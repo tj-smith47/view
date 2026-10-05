@@ -240,8 +240,8 @@ pub struct Dvr {
     /// A confirmed branch waits for the loop; input folded meanwhile goes
     /// to the engine being replaced and is not logged.
     paused: bool,
-    /// Replayed inputs still to fold, which are logged already.
-    suppress: usize,
+    /// Whether a replayed input is being folded, which reaches no agent.
+    replaying: bool,
     /// The words of the replayed DVR verbs still to arrive, in order,
     /// which run nothing.
     owed: VecDeque<String>,
@@ -550,17 +550,20 @@ impl Dvr {
         self.paused = false;
     }
 
-    /// The replay a branch staged, to fold in order now, followed by a
-    /// resize to `size`, the terminal's size now, and the input a person
-    /// typed while it was owed. The log holds the replayed inputs already,
-    /// so folding them logs nothing, and the DVR verbs they invoke run
-    /// nothing. Empty when no replay is owed.
+    /// The replay a branch staged, to fold in order now, each input a
+    /// [`Msg::Replayed`], followed by a resize to `size`, the terminal's
+    /// size now, and the input a person typed while it was owed. The log
+    /// holds the replayed inputs already, so folding them logs nothing, and
+    /// the DVR verbs they invoke run nothing. Empty when no replay is owed.
     pub fn take_replay(&mut self, size: (u16, u16)) -> Vec<Msg> {
-        let mut replay = std::mem::take(&mut self.replay);
+        let replay = std::mem::take(&mut self.replay);
         if replay.is_empty() {
             return replay;
         }
-        self.suppress = replay.len();
+        let mut replay: Vec<Msg> = replay
+            .into_iter()
+            .map(|msg| Msg::Replayed(Box::new(msg)))
+            .collect();
         self.owed = self
             .history
             .iter()
@@ -573,6 +576,18 @@ impl Dvr {
         });
         replay.append(&mut self.held);
         replay
+    }
+
+    /// Whether a replayed input is being folded.
+    #[must_use]
+    pub fn replaying(&self) -> bool {
+        self.replaying
+    }
+
+    /// Notes whether a replayed input is being folded, returning what was
+    /// noted before.
+    pub(crate) fn set_replaying(&mut self, replaying: bool) -> bool {
+        std::mem::replace(&mut self.replaying, replaying)
     }
 
     /// Takes the replayed DVR verb `word`, which runs nothing, when it is
@@ -643,10 +658,6 @@ impl Dvr {
             Msg::Resized { .. } => (InputKind::Resized, 4),
             _ => return,
         };
-        if self.suppress > 0 {
-            self.suppress -= 1;
-            return;
-        }
         let span = u32::try_from(self.arena.len())
             .ok()
             .zip(u32::try_from(len).ok());

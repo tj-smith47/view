@@ -311,6 +311,12 @@ impl PromptState {
         }
     }
 
+    /// Adds `sentence` to the end of the question.
+    pub(crate) fn add_sentence(&mut self, sentence: &str) {
+        self.message.push(' ');
+        self.message.push_str(sentence);
+    }
+
     /// The frame an open [`PromptState::dvr_branch_prompt`] branches from.
     #[must_use]
     pub fn dvr_branch_at(&self) -> Option<u64> {

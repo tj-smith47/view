@@ -175,7 +175,7 @@ pub(crate) fn dispatch<E: EngineOps>(
     };
     // the typed-ahead hold reads how long nvim has had to answer the keys
     // before this one, and the fold below cannot read a clock
-    if matches!(msg, Msg::Key(_)) {
+    if matches!(msg.unmarked(), Msg::Key(_)) {
         note_key_arrival(model, follow_ups.speculate);
     }
     // a key that could begin one the takeover left unregistered waits for
@@ -355,7 +355,7 @@ pub(crate) fn dispatch<E: EngineOps>(
 /// may hold ([`crate::native::NativeSession::holds`] decides per effect).
 fn is_held_kind(msg: &Msg) -> bool {
     matches!(
-        msg,
+        msg.unmarked(),
         Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_) | Msg::Resized { .. }
     )
 }

@@ -418,6 +418,11 @@ pub(super) fn ai_panel_key(
     if matches!(&model.ai_panel().pending_permission, Some(p) if !p.shown()) {
         return Vec::new();
     }
+    // a request raised before a branch is the live agent's, and a key
+    // replayed from the recording was never an answer to it
+    if model.dvr.replaying() && model.ai_panel().pending_permission.is_some() {
+        return Vec::new();
+    }
     if let Some(prompt) = model.ai_panel().pending_permission.clone() {
         // <Esc> settles the request as `Cancelled` rather than
         // any offered option -- the one answer that exists
@@ -538,6 +543,12 @@ pub(super) fn ai_panel_key(
         }
     } else if ai_scroll_for(notation).is_some() {
         if scroll_ai_transcript(model, notation) {
+            model.dirty = true;
+        }
+    } else if notation == "<CR>" && model.dvr.replaying() {
+        // the prompt was sent when it was recorded; the composer empties
+        // as it did then
+        if !model.ai_panel_mut().take_input().is_empty() {
             model.dirty = true;
         }
     } else if notation == "<CR>" {

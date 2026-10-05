@@ -176,6 +176,10 @@ pub fn tell_taken_over(
 /// the boundary as a returned [`Effect`] instead of being performed here.
 #[must_use]
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
+    let (msg, replayed) = match msg {
+        Msg::Replayed(inner) => (*inner, true),
+        msg => (msg, false),
+    };
     // ahead of the hold, which would keep a scrub key as the start of a
     // mapping
     if let Some(effects) = dvr::scrub_input(model, &msg) {
@@ -196,19 +200,21 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             effects.extend(update(model, held));
         }
     }
-    let Some(msg) = model.submit_hold.hold(msg) else {
+    let Some(msg) = model.submit_hold.hold(msg, replayed) else {
         return effects;
     };
     // a prompt view raised itself answers in view, and a replay would type
     // its answer into the engine
-    if model.dvr.is_recording() && !route::answers_a_view_prompt(model, &msg) {
+    if !replayed && model.dvr.is_recording() && !route::answers_a_view_prompt(model, &msg) {
         model.dvr.record(&msg);
     }
     let releases = crate::native::submit_hold::releases(model, &msg);
     if crate::native::submit_hold::note_line_bound(model, &msg) {
         effects.push(Effect::Rpc(RpcCall::RegisterCommand));
     }
-    effects.extend(update_one(model, msg));
+    effects.extend(dvr::fold_replayed(model, replayed, |model| {
+        update_one(model, msg)
+    }));
     // replayed after the command has run, so the focus it set routes them,
     // or once it stops at a prompt they answer. A replayed `:View` submit
     // arms a fresh hold, which the rest are then kept behind in order
@@ -443,6 +449,8 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             effects.extend(route::route_unescaped(model, notation, modal_was_open));
             effects
         }
+        // `update` takes the mark off before folding what it wraps
+        Msg::Replayed(inner) => update(model, *inner),
         Msg::Paste(text) => match model.focus() {
             // never replayed as nvim_input keystrokes: one undo unit, no
             // mapping interference, matching nvim_paste's own contract.

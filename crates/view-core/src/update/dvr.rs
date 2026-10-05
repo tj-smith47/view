@@ -163,13 +163,16 @@ pub(super) fn on_io(model: &mut Model, reply: &DvrIoReply) -> Vec<Effect> {
     } = reply
     {
         if let Some(at) = model.dvr.take_asked() {
-            let state = PromptState::dvr_branch_prompt(
+            let mut state = PromptState::dvr_branch_prompt(
                 at,
                 &unsaved_files(&model.buffers),
                 changed,
                 model.dvr.restarts_before(at),
                 *unverifiable,
             );
+            for sentence in agent_waits(model) {
+                state.add_sentence(sentence);
+            }
             // beneath a prompt the engine waits on, which keeps its answer
             // and is the question the live screen has to show
             if let Some(OverlayKind::Prompt(_)) = model.focused_overlay().map(|ov| &ov.kind) {
@@ -187,6 +190,54 @@ pub(super) fn on_io(model: &mut Model, reply: &DvrIoReply) -> Vec<Effect> {
     };
     model.dirty = true;
     model.engine.record_native_notice(text, false)
+}
+
+/// What the branch confirm says of the agent, which a branch leaves
+/// running: a turn in flight and a request waiting on the person.
+fn agent_waits(model: &Model) -> Vec<&'static str> {
+    let panel = model.ai_panel();
+    [
+        (
+            panel.turn_in_flight,
+            "The agent's turn in flight keeps running.",
+        ),
+        (
+            panel.pending_permission.is_some(),
+            "The agent's permission request stays waiting.",
+        ),
+        (
+            panel.pending_diff.is_some(),
+            "The agent's proposed change stays waiting for review.",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(waits, sentence)| waits.then_some(sentence))
+    .collect()
+}
+
+/// Runs `fold`, the fold of one input, keeping every effect that reaches
+/// the agent from leaving it while a `replayed` input, or one folded inside
+/// it, is folded.
+pub(super) fn fold_replayed(
+    model: &mut Model,
+    replayed: bool,
+    fold: impl FnOnce(&mut Model) -> Vec<Effect>,
+) -> Vec<Effect> {
+    let replaying = replayed || model.dvr.replaying();
+    let outer = model.dvr.set_replaying(replaying);
+    let mut effects = fold(model);
+    // the agent outlives a branch, so a recorded prompt or answer replayed
+    // into it would be sent again, now
+    if replaying {
+        effects.retain(|effect| {
+            !matches!(
+                effect,
+                Effect::Ai(_) | Effect::AiPromptSubmit { .. } | Effect::AiTrustSet { .. }
+            )
+        });
+    }
+    model.dvr.set_replaying(outer);
+    effects
 }
 
 /// Closes every view overlay and drops any held keys, returning what each
@@ -556,7 +607,8 @@ mod tests {
 
     /// Confirms a branch from frame `at` and settles it the way the loop
     /// does once the fresh engine is up, then paints frames up to `upto`.
-    fn branched(m: &mut Model, at: u64, upto: u64) {
+    /// Returns what folding the replay owed the executor.
+    fn branched(m: &mut Model, at: u64, upto: u64) -> Vec<Effect> {
         // opened directly: a scrub invoked with no keys behind it would
         // count as one the replay invokes again
         m.dvr.open_scrub();
@@ -574,12 +626,110 @@ mod tests {
         assert_eq!(plan.at_frame, at);
         m.dvr.branched(plan.at_frame, plan.replay);
         let _ = m.takes_attach();
+        let mut effects = Vec::new();
         for msg in crate::update::due_replay(m) {
-            let _ = update(m, msg);
+            effects.extend(update(m, msg));
         }
         for seq in m.dvr.markers().last().map_or(0, |(f, _)| *f) + 1..=upto {
             m.dvr.note_frame(seq, 2);
         }
+        effects
+    }
+
+    fn reaches_agent(effects: &[Effect]) -> bool {
+        effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::Ai(_) | Effect::AiPromptSubmit { .. } | Effect::AiTrustSet { .. }
+            )
+        })
+    }
+
+    /// A model recording with the agent panel open and holding the keys.
+    fn panel_open() -> Model {
+        let mut m = recorded();
+        m.ai_enabled = true;
+        m.ai_trusted = true;
+        let open = Msg::FeatureInvoke {
+            generation: None,
+            feature: "ai".to_owned(),
+            verb: "open".to_owned(),
+        };
+        let _ = update(&mut m, open);
+        assert!(m.ai_panel().focused);
+        m
+    }
+
+    #[test]
+    fn a_replayed_panel_prompt_reaches_no_agent() {
+        let mut m = panel_open();
+        let mut live = Vec::new();
+        for k in ["h", "i", "<CR>"] {
+            live.extend(update(&mut m, key(k)));
+        }
+        assert!(reaches_agent(&live), "recorded as sent: {live:?}");
+        m.ai_panel_mut().turn_in_flight = false;
+        m.dvr.note_frame(10, 2);
+
+        let replayed = branched(&mut m, 10, 12);
+        assert!(!reaches_agent(&replayed), "{replayed:?}");
+        assert!(!m.ai_panel().turn_in_flight);
+        assert!(m.ai_panel().input().is_empty(), "the composer empties");
+    }
+
+    #[test]
+    fn a_pending_permission_survives_a_replay_of_its_option_keys() {
+        let mut m = panel_open();
+        for k in ["1", "2", "<Esc>"] {
+            let _ = update(&mut m, key(k));
+        }
+        m.ai_panel_mut().focused = true;
+        m.dvr.note_frame(10, 2);
+        let options =
+            ["allow-once", "reject-once"].map(|id| crate::native::ai_event::PermissionOption {
+                option_id: id.to_owned(),
+                name: id.to_owned(),
+                kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
+            });
+        let asked = Msg::Ai(crate::native::ai_event::AiEvent::PermissionRequested {
+            request_id: 7,
+            tool_call_id: "call".to_owned(),
+            title: None,
+            tool_kind: None,
+            options: options.to_vec(),
+        });
+        let _ = update(&mut m, asked);
+        let pending = m.ai_panel_mut().pending_permission.as_mut().unwrap();
+        pending.note_shown();
+        let before = pending.clone();
+
+        let replayed = branched(&mut m, 11, 12);
+        assert!(!reaches_agent(&replayed), "{replayed:?}");
+        assert_eq!(m.ai_panel().pending_permission.as_ref(), Some(&before));
+    }
+
+    #[test]
+    fn the_branch_confirm_names_what_the_agent_has_waiting() {
+        let mut m = recorded();
+        branch_back(&mut m, 2);
+        checked(&mut m, &[], false);
+        let quiet = prompt_text(&m).unwrap();
+        assert!(!quiet.contains("agent"), "{quiet}");
+
+        let mut m = recorded();
+        m.ai_panel_mut().turn_in_flight = true;
+        m.ai_panel_mut().pending_permission = Some(crate::native::ai_panel::PermissionPrompt::new(
+            7,
+            "call",
+            None,
+            None,
+            Vec::new(),
+        ));
+        branch_back(&mut m, 2);
+        checked(&mut m, &[], false);
+        let text = prompt_text(&m).unwrap();
+        assert!(text.contains("turn in flight keeps running"), "{text}");
+        assert!(text.contains("permission request stays waiting"), "{text}");
     }
 
     #[test]

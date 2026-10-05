@@ -92,8 +92,10 @@ mod tests {
                 clipboard: mpsc::channel().0,
                 osc52: mpsc::channel().0,
                 picker: mpsc::channel().0,
+                // a program that does not exist, so nothing a test types
+                // can start an agent
                 ai: crate::ai_worker::AiWorker::new(
-                    view_ai::AgentSpec::Id("claude-code".to_string()),
+                    view_ai::AgentSpec::Command(vec!["view-dvr-test-no-agent".to_string()]),
                     std::path::PathBuf::from("."),
                     msg.clone(),
                 ),
@@ -452,7 +454,15 @@ mod tests {
             |r, _| picked(r).as_deref() == Some("abcd"),
         );
 
-        let fresh = rig.branch(
+        let logged: Vec<Vec<u8>> = rig
+            .model
+            .dvr
+            .inputs()
+            .take_while(|input| input.after_frame < at)
+            .map(|input| input.body.to_vec())
+            .collect();
+
+        let mut fresh = rig.branch(
             &mut engine,
             &respawn,
             (&route, &ai_route, &executor),
@@ -465,6 +475,28 @@ mod tests {
             "no query key reached the buffer"
         );
         assert_eq!(eval(&fresh.engine, "mode()"), "n");
+        let mut expected = logged;
+        expected.push(vec![80, 0, 24, 0]);
+        let after: Vec<Vec<u8>> = rig.model.dvr.inputs().map(|i| i.body.to_vec()).collect();
+        assert_eq!(after, expected, "the recording, then the closing size");
+
+        typed(&mut rig, &fresh.executor, &keys(&["d"]));
+        rig.settle(
+            &fresh.engine,
+            &fresh.pump,
+            &fresh.executor,
+            "the branch takes the query",
+            |r, _| picked(r).is_some_and(|q| q.len() >= 4),
+        );
+        let at = rig.frames;
+        let _again = rig.branch(
+            &mut fresh.engine,
+            &respawn,
+            (&route, &ai_route, &fresh.executor),
+            at,
+            |r, _| picked(r).is_some_and(|q| q.len() >= 4),
+        );
+        assert_eq!(picked(&mut rig).as_deref(), Some("abcd"));
     }
 
     #[test]

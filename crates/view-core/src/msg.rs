@@ -148,6 +148,9 @@ pub enum Msg {
     EscapeTimeout(Duration),
     /// A terminal bracketed-paste payload.
     Paste(String),
+    /// An input a DVR branch replays: folded as the input it wraps, logged
+    /// already, and reaching no agent.
+    Replayed(Box<Msg>),
     /// A terminal mouse event in nvim's button/action/modifier vocabulary.
     Mouse(MouseInput),
     /// The async reply to an `nvim_get_hl(0, {name = "Normal"})` probe
@@ -1210,6 +1213,17 @@ pub struct MouseInput {
 #[derive(Debug, Clone)]
 pub struct Key {
     pub notation: String,
+}
+
+impl Msg {
+    /// The input a [`Msg::Replayed`] wraps, or this message itself.
+    #[must_use]
+    pub fn unmarked(&self) -> &Msg {
+        match self {
+            Self::Replayed(inner) => inner.unmarked(),
+            msg => msg,
+        }
+    }
 }
 
 /// How the engine process exited.

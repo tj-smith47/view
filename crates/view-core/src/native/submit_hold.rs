@@ -1004,11 +1004,16 @@ impl SubmitHold {
     }
 
     /// Keeps `msg` when a hold stands and it is input, handing it back
-    /// otherwise.
-    pub fn hold(&mut self, msg: Msg) -> Option<Msg> {
+    /// otherwise. A `replayed` input is kept as a [`Msg::Replayed`], so it
+    /// is released still marked.
+    pub fn hold(&mut self, msg: Msg, replayed: bool) -> Option<Msg> {
         match (&mut self.held, &msg) {
             (Some((_, held)), Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_)) => {
-                held.push(msg);
+                held.push(if replayed {
+                    Msg::Replayed(Box::new(msg))
+                } else {
+                    msg
+                });
                 None
             }
             _ => Some(msg),
