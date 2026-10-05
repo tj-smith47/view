@@ -1449,11 +1449,13 @@ fn keys_typed_ahead_after_a_mark_jump_of_three_keys_reach_the_picker() {
 
 /// With nvim in insert mode or on a command line, the key that leaves it,
 /// then view's key and a query, typed at once: the query waits for view's
-/// invocation and reaches the picker, and the buffer is unchanged.
+/// invocation and reaches the picker, and the buffer is unchanged. A
+/// submitted line also holds view's key until nvim reports the line ran.
 #[test]
 fn keys_typed_ahead_after_leaving_insert_reach_the_picker() {
-    let leads: [(&str, &[&str]); 2] = [("i", &["<Esc>"]), (":", &["n", "o", "h", "<CR>"])];
-    for (enter, lead) in leads {
+    let leads: [(&str, &[&str], usize); 2] =
+        [("i", &["<Esc>"], 3), (":", &["n", "o", "h", "<CR>"], 0)];
+    for (enter, lead, at_once) in leads {
         let session = Session::start_with(
             "typed-ahead-leaving-insert",
             "vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'foo' })\n",
@@ -1471,7 +1473,7 @@ fn keys_typed_ahead_after_leaving_insert_reach_the_picker() {
             matches!(msg, Msg::FeatureInvoke { .. }).then_some(())
         })
         .unwrap_or_else(|| panic!("nvim runs view's <leader>ff after {lead:?}"));
-        assert_eq!(sent, keys[..lead.len() + 3], "{lead:?}");
+        assert_eq!(sent, keys[..lead.len() + at_once], "{lead:?}");
         assert_eq!(
             session.eval("join(getline(1, '$'), '|')"),
             "foo",
@@ -2196,159 +2198,6 @@ fn literal_taking_key(command: &str) -> Option<String> {
         return Some(format!("<C-{}>", name.to_lowercase()));
     }
     (key.chars().count() == 1).then(|| key.to_string())
-}
-
-/// The command tables a `:` line is read with, re-derived from the engine
-/// they were read off.
-///
-/// `TAKES_BAR` is `:help :bar`'s list and `MODIFIERS` is
-/// `:help :command-modifiers`' list less `:sandbox`, both transcribed by
-/// hand, so a version bump that adds or drops a command drifts them
-/// silently. The commands' fewest-characters counts are asked of the
-/// engine's own `fullcommand()`. The modifiers' counts are asked of the
-/// modifier parser, which keeps its own minimums, by running a user `View`
-/// that records its `<q-mods>` behind each one at its count and at one
-/// character fewer. `:filter` is left out of `<q-mods>`, so its rows ask
-/// whether `View` ran at all.
-///
-/// Skipped where the runtime ships no documentation, for the reason the
-/// literal-key test above gives.
-#[test]
-fn the_command_tables_match_the_pinned_engines_help() {
-    use view_core::native::submit_hold::commands::{FILTER, MODIFIERS, SCRIPT_COMMANDS, TAKES_BAR};
-
-    let session = Session::start_with(
-        "command-tables",
-        "vim.cmd([[\n\
-         command! -nargs=* View let g:ran = <q-mods>\n\
-         function! Ran(line)\n\
-           let g:ran = 'not run'\n\
-           try\n\
-             exe a:line\n\
-           catch\n\
-           endtry\n\
-           return g:ran\n\
-         endfunction\n\
-         ]])\n",
-    );
-    let doc = Path::new(&session.eval("$VIMRUNTIME")).join("doc");
-    let (Ok(cmdline), Ok(map)) = (
-        std::fs::read_to_string(doc.join("cmdline.txt")),
-        std::fs::read_to_string(doc.join("map.txt")),
-    ) else {
-        eprintln!(
-            "skipped: {} holds no cmdline.txt and map.txt to re-derive the tables from",
-            doc.display()
-        );
-        return;
-    };
-
-    let (named, forms) = bar_commands(&cmdline);
-    let names = |table: &[(&'static str, usize)]| -> Vec<&'static str> {
-        table.iter().map(|&(name, _)| name).collect()
-    };
-    assert_eq!(names(&TAKES_BAR), named, ":help :bar lists these commands");
-    assert_eq!(
-        forms,
-        [":read !", ":write !", ":[range]!"],
-        ":help :bar lists these filter forms, which `takes_bar` reads apart from the table"
-    );
-    let mut listed = command_modifiers(&map);
-    assert!(
-        listed.contains(&"sandbox"),
-        ":help :command-modifiers no longer lists :sandbox, which MODIFIERS leaves out"
-    );
-    listed.retain(|&name| name != "sandbox");
-    assert_eq!(
-        names(&MODIFIERS),
-        listed,
-        ":help :command-modifiers lists these modifiers besides :sandbox"
-    );
-
-    for &(full, shortest) in TAKES_BAR.iter().chain(&SCRIPT_COMMANDS) {
-        let runs = |typed: &str| session.eval(&format!("fullcommand('{typed}')")) == full;
-        assert!(
-            runs(&full[..shortest]),
-            "`:{}` runs `:{full}`",
-            &full[..shortest]
-        );
-        assert!(
-            shortest == 1 || !runs(&full[..shortest - 1]),
-            "`:{}` already runs `:{full}`, so {shortest} is not the fewest characters",
-            &full[..shortest - 1]
-        );
-    }
-
-    const NOT_RUN: &str = "not run";
-    let ran = |line: &str| session.eval(&format!("Ran('{line}')"));
-    assert_eq!(
-        ran("sandbox View"),
-        NOT_RUN,
-        "`:sandbox View` runs a user command, so MODIFIERS should list :sandbox"
-    );
-    for &(full, shortest) in &MODIFIERS {
-        let reported = match full {
-            "leftabove" => "aboveleft",
-            "rightbelow" => "belowright",
-            _ => full,
-        };
-        let line = |length: usize| format!("{} View", &full[..length]);
-        assert_eq!(
-            ran(&line(shortest)),
-            reported,
-            "`:{}` runs `:View` behind `:{full}`",
-            line(shortest)
-        );
-        assert_ne!(
-            ran(&line(shortest - 1)),
-            reported,
-            "`:{}` already runs `:View` behind `:{full}`, so {shortest} is not the fewest characters",
-            line(shortest - 1)
-        );
-    }
-    let (full, shortest) = FILTER;
-    for pattern in [" /x/", " /[/]/", " /x/g"] {
-        let line = |length: usize| format!("{}{pattern} View", &full[..length]);
-        assert_ne!(
-            ran(&line(shortest)),
-            NOT_RUN,
-            "`:{}` does not run `:View`",
-            line(shortest)
-        );
-        assert_eq!(
-            ran(&line(shortest - 1)),
-            NOT_RUN,
-            "`:{}` already runs `:View`, so {shortest} is not the fewest characters of `:{full}`",
-            line(shortest - 1)
-        );
-    }
-}
-
-/// The commands `:help :bar` lists by name, and the forms it lists with
-/// an argument (`:read !`), in the order the file gives them.
-fn bar_commands(help: &str) -> (Vec<&str>, Vec<&str>) {
-    let (named, forms) = help
-        .lines()
-        .skip_while(|line| !line.contains("*:bar*"))
-        .skip_while(|line| !line.starts_with("    :"))
-        .take_while(|line| line.starts_with("    :"))
-        .map(str::trim)
-        .partition::<Vec<_>, _>(|entry| entry[1..].chars().all(|c| c.is_ascii_alphanumeric()));
-    (named.into_iter().map(|entry| &entry[1..]).collect(), forms)
-}
-
-/// The modifiers `:help :command-modifiers` lists, in its order.
-fn command_modifiers(help: &str) -> Vec<&str> {
-    let Some(start) = help.find("*:command-modifiers*") else {
-        return Vec::new();
-    };
-    let paragraph = &help[start..];
-    let end = paragraph.find("Note that").unwrap_or(paragraph.len());
-    paragraph[..end]
-        .split('|')
-        .filter_map(|token| token.strip_prefix(':'))
-        .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase()))
-        .collect()
 }
 
 /// Pairs of spellings for one key or two: each modifier and named-key

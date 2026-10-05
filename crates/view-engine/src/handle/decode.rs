@@ -237,14 +237,17 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         "notify_sink" => Some(Msg::NotifySinkRead {
             foreign: first.as_bool()?,
         }),
+        // a submitted `:` line that has returned to nvim's main loop, sent
+        // by the command's own registration (`REGISTER_COMMAND_CHUNK`) so
+        // it follows every invocation the line made on the same channel
+        "line_ran" => Some(Msg::CommandLineRan {
+            line: first.as_str()?.to_owned(),
+        }),
         // the `:` reading taken again after a plugin loaded late, sent only
         // when it disagrees with the last one: the registration's own answer
         // names only what was mapped when it went out, and a plugin that
         // maps `:` afterwards is what closes the palette's speculation
         // (`REGISTER_MAPPINGS_CHUNK`)
-        "line_ran" => Some(Msg::CommandLineRan {
-            line: first.as_str()?.to_owned(),
-        }),
         "colon_mapped" => Some(Msg::ColonMappingRead {
             mapped: first.as_bool()?,
         }),

@@ -942,6 +942,9 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn register_command(&self) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn ui_attach(
             &self,
             _width: u16,

@@ -7729,12 +7729,25 @@ fn a_redraw_before_the_line_is_shown_keeps_the_line_nvims() {
 fn the_previous_line_closing_keeps_the_next_line_nvims() {
     let mut m = focused_windowed_tree();
     m.engine.mode.current = "normal".to_string();
-    let _ = typed(&mut m, &[":", "w", "<CR>", ":"]);
+    let _ = typed(&mut m, &[":", "w", "<CR>"]);
+    reported(&mut m, "w");
+    let _ = typed(&mut m, &[":"]);
     answer_batch(&mut m, vec![colon_line("w"), UiEvent::Flush]);
     let closed = line_closed(&m);
     answer_batch(&mut m, closed);
     let effects = typed(&mut m, &["V"]);
     assert_eq!(meta_inputs(&effects), ["V"], "{effects:?}");
+}
+
+/// nvim's report that the `:` line `line` has run, which the keys typed
+/// behind its `<CR>` wait for.
+fn reported(m: &mut Model, line: &str) {
+    let _ = update(
+        m,
+        Msg::CommandLineRan {
+            line: line.to_string(),
+        },
+    );
 }
 
 fn normal_mode_change() -> UiEvent {
@@ -7774,7 +7787,9 @@ fn sent_at_zero(m: &mut Model, keys: &[&str]) -> Vec<Effect> {
 fn a_search_closing_ahead_of_the_previous_line_keeps_the_next_line_nvims() {
     let mut m = focused_windowed_tree();
     m.engine.mode.current = "normal".to_string();
-    let _ = typed(&mut m, &[":", "w", "<CR>", ":"]);
+    let _ = typed(&mut m, &[":", "w", "<CR>"]);
+    reported(&mut m, "w");
+    let _ = typed(&mut m, &[":"]);
     let search = UiEvent::CmdlineShow {
         content: vec![(0, "foo".into())],
         pos: 3,
@@ -7807,7 +7822,10 @@ fn a_search_closing_ahead_of_the_previous_line_keeps_the_next_line_nvims() {
 fn a_mode_reported_ahead_of_a_counted_hide_keeps_the_next_line_nvims() {
     let mut m = focused_windowed_tree();
     m.engine.mode.current = "normal".to_string();
-    let _ = sent_at_zero(&mut m, &[":", "w", "<CR>", ":", "w", "<CR>"]);
+    let _ = sent_at_zero(&mut m, &[":", "w", "<CR>"]);
+    reported(&mut m, "w");
+    let _ = sent_at_zero(&mut m, &[":", "w", "<CR>"]);
+    reported(&mut m, "w");
     let submitted = |m: &mut Model| {
         answer_batch(m, vec![colon_line(""), UiEvent::Flush]);
         answer_batch(m, vec![colon_line("w"), UiEvent::Flush]);
@@ -7854,7 +7872,9 @@ fn an_expression_line_ending_returns_to_the_line_beneath() {
     let effects = typed(&mut m, &line);
     assert_eq!(meta_inputs(&effects), line, "{effects:?}");
 
-    let _ = typed(&mut m, &["<CR>", ":", "1"]);
+    let _ = typed(&mut m, &["<CR>"]);
+    reported(&mut m, "1x");
+    let _ = typed(&mut m, &[":", "1"]);
     let expression = UiEvent::CmdlineShow {
         content: vec![(0, "1".into())],
         pos: 1,
@@ -7886,7 +7906,9 @@ fn an_expression_line_ending_returns_to_the_line_beneath() {
 fn the_previous_line_shown_and_closed_late_keeps_the_next_line_nvims() {
     let mut m = focused_windowed_tree();
     m.engine.mode.current = "normal".to_string();
-    let _ = typed(&mut m, &[":", "w", "<CR>", ":", "w"]);
+    let _ = typed(&mut m, &[":", "w", "<CR>"]);
+    reported(&mut m, "w");
+    let _ = typed(&mut m, &[":", "w"]);
     answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
     answer_batch(&mut m, vec![colon_line("w"), UiEvent::Flush]);
     let mut closed = line_closed(&m);
@@ -23785,14 +23807,20 @@ fn text_typed_after_a_slow_answer_on_a_local_link_waits_one_round_trip() {
 #[test]
 fn an_answer_behind_a_key_that_leaves_the_command_line_releases_nothing() {
     let mut m = hold_model(false, false);
-    let mut steps = vec![(k(":"), 0), (Step::Mode("cmdline_normal"), 1)];
-    steps.extend(["n", "o", "h", "<CR>", " ", "f", "f"].map(|key| (k(key), 100)));
+    let mut line = vec![(k(":"), 0), (Step::Mode("cmdline_normal"), 1)];
+    line.extend(["n", "o", "h", "<CR>"].map(|key| (k(key), 100)));
+    let mut sent = sent_stamped(&mut m, &line);
+    // the line's report, which the keys behind the `<CR>` wait for
+    let replayed = update(
+        &mut m,
+        Msg::CommandLineRan {
+            line: "noh".to_string(),
+        },
+    );
+    sent.extend(meta_inputs(&replayed).into_iter().map(str::to_string));
+    let mut steps: Vec<(Step, u64)> = [" ", "f", "f"].map(|key| (k(key), 100)).into();
     steps.extend([(Step::Answer, 110), (k("m"), 120)]);
-    let mut sent = Vec::new();
-    for (step, at) in steps {
-        let effects = apply_stamped(&mut m, step, at);
-        sent.extend(meta_inputs(&effects).into_iter().map(str::to_string));
-    }
+    sent.extend(sent_stamped(&mut m, &steps));
     assert!(m.submit_hold.is_holding());
     assert_eq!(sent, [":", "n", "o", "h", "<CR>", " ", "f", "f"]);
 }

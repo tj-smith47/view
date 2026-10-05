@@ -344,13 +344,29 @@ fn query_new(session: &mut PtySession, open: &[u8]) {
 }
 
 /// Keys typed in the same write as a view command that refuses act in the
-/// file, and the refusal is kept in nvim's messages.
+/// file once the line has run, well inside the bound that releases them
+/// when no report comes, and the refusal is kept in nvim's messages.
 #[test]
 fn a_key_typed_behind_a_refused_view_command_acts_in_the_file() {
-    let (_paths, _tree, mut session) = editing_old("picker-keys-refused-command");
+    let (_paths, _tree, mut session) =
+        editing_old_with("picker-keys-refused-command", &[("VIEW_AI_AGENT", "none")]);
+    let sent = std::time::Instant::now();
     session
         .send(b"\x1b:View dvr export $VIEW_KEYS_NEVER_SET/x\rdd")
         .unwrap();
+    assert!(
+        session.wait_for_screen(budget(), |screen| {
+            let text = screen.contents();
+            !text.contains("o1") && text.contains("o2")
+        }),
+        "the keys behind the refused command never deleted a line; screen:\n{}",
+        session.screen()
+    );
+    let took = sent.elapsed();
+    assert!(
+        took < view_core::native::speculate::CMDLINE_SPECULATION_BACKSTOP_MIN,
+        "the keys waited {took:?}, as long as a line nothing reports"
+    );
     assert!(
         lines_are(&mut session, "o2,o3|"),
         "the keys behind the refused command acted elsewhere; screen:\n{}",
@@ -364,6 +380,25 @@ fn a_key_typed_behind_a_refused_view_command_acts_in_the_file() {
         "the refusal said nothing; screen:\n{}",
         session.screen()
     );
+}
+
+/// A query typed in the same write as a line that sleeps before it opens
+/// the picker reaches the picker.
+#[test]
+fn a_query_typed_behind_a_line_that_sleeps_before_the_picker_reaches_it() {
+    let (_paths, _tree, mut session) =
+        editing_old_with("picker-keys-sleep-line", &[("VIEW_AI_AGENT", "none")]);
+    query_new(&mut session, b"\x1b:sleep 10m | View picker files\r");
+}
+
+/// A query typed in the same write as a user command that opens the
+/// picker reaches the picker.
+#[test]
+fn a_query_typed_behind_a_user_command_opening_the_picker_reaches_it() {
+    let (_paths, _tree, mut session) =
+        editing_old_with("picker-keys-user-command", &[("VIEW_AI_AGENT", "none")]);
+    session.send(b":command! T View picker files\r").unwrap();
+    query_new(&mut session, b"\x1b:T\r");
 }
 
 /// A file deleted after the picker listed it says so on screen when

@@ -230,10 +230,12 @@ pub enum Msg {
         feature: String,
         verb: String,
     },
-    /// A `:` command line nvim has finished running, `line` its text as
-    /// submitted. nvim sends it on the channel `:View` notifies on, after
-    /// every invocation the line made, and for a line that failed, ran
-    /// nothing, was refused or ended at a prompt waiting for a key. A line left with `<Esc>`, and a
+    /// A `:` command line nvim has finished running, `line` the first
+    /// [`LINE_REPORT_CHARS`](crate::native::submit_hold::LINE_REPORT_CHARS)
+    /// characters of its text as submitted. nvim sends it on the channel
+    /// `:View` notifies on once the line has returned to its main loop,
+    /// after every invocation the line made, and for a line that failed,
+    /// ran nothing or was refused. A line left with `<Esc>`, and a
     /// mapping's `<Cmd>`, send none.
     CommandLineRan {
         line: String,
@@ -2386,6 +2388,11 @@ pub enum RpcCall {
     RegisterBridge {
         channel_id: u64,
     },
+    /// Registers the `:View` command and its line report again on this
+    /// connection, the same chunk the attach runs. A config that cleared
+    /// view's autocmd group (`:autocmd! view_line_ran`) removed the
+    /// report, and a hold a `:` line armed reaching its bound sends this.
+    RegisterCommand,
     /// Injects view's `g:clipboard` provider, conditionally: the chunk (see
     /// `view-engine`'s `REGISTER_CLIPBOARD_CHUNK`) checks `vim.g.clipboard`
     /// and only installs view's dict when the user's config left it unset,

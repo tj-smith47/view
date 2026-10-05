@@ -205,6 +205,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         model.dvr.record(&msg);
     }
     let releases = crate::native::submit_hold::releases(model, &msg);
+    if crate::native::submit_hold::bounds_a_line(model, &msg) {
+        effects.push(Effect::Rpc(RpcCall::RegisterCommand));
+    }
     effects.extend(update_one(model, msg));
     // replayed after the command has run, so the focus it set routes them.
     // A replayed `:View` submit arms a fresh hold, which the rest are then

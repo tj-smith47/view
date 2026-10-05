@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use view_core::msg::Msg;
 use view_core::native::mappings::{MappingSpec, Rhs};
+use view_core::native::submit_hold::LINE_REPORT_CHARS;
 use view_engine::process::{Engine, EngineConfig};
 
 const TICK: Duration = Duration::from_millis(500);
@@ -116,8 +117,10 @@ fn until_line_ran(rx: &mpsc::Receiver<Msg>) -> Vec<String> {
 
 /// nvim reports a submitted `:` line once it has run, after every
 /// invocation the line made: a chained line, a line built by `:execute`, a
-/// branch, a refused view command, an unknown command, an empty line and a
-/// line a mapping types. A line left with `<Esc>` and a mapping's `<Cmd>`
+/// branch, a refused view command, an unknown command, an empty line, a
+/// line a mapping types, a line that sleeps or waits before its view
+/// command, and a line that leaves the editor in insert or terminal mode.
+/// A line left with `<Esc>` and a mapping's `<Cmd>`
 /// report nothing, so the next report is the next submitted line's.
 #[test]
 fn a_submitted_line_is_reported_after_the_invocations_it_made() {
@@ -170,10 +173,122 @@ fn a_submitted_line_is_reported_after_the_invocations_it_made() {
             vec!["invoke cmd map", "invoke after cmd", "ran View after cmd"],
         ),
         ("K", vec!["invoke typed map", "ran View typed map"]),
+        (
+            ":lua vim.wait(10) vim.cmd('View after wait')<CR>",
+            vec![
+                "invoke after wait",
+                "ran lua vim.wait(10) vim.cmd('View after wait')",
+            ],
+        ),
+        (
+            ":sleep 10m | View after sleep<CR>",
+            vec!["invoke after sleep", "ran sleep 10m | View after sleep"],
+        ),
+        (
+            ":startinsert | View after insert<CR>",
+            vec!["invoke after insert", "ran startinsert | View after insert"],
+        ),
+        (
+            "<Esc>:exe 'terminal cat' | startinsert<CR>",
+            vec!["ran exe 'terminal cat' | startinsert"],
+        ),
     ] {
         engine.handle.input(keys).unwrap();
         assert_eq!(until_line_ran(&rx), want, "{keys}");
     }
+}
+
+/// The invocations and finished command lines `rx` delivers within
+/// `quiet`, in the order they arrive.
+fn arriving_within(rx: &mpsc::Receiver<Msg>, quiet: Duration) -> Vec<String> {
+    let until = std::time::Instant::now() + quiet;
+    let mut seen = Vec::new();
+    while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(Msg::FeatureInvoke { feature, verb, .. }) => {
+                seen.push(format!("invoke {feature} {verb}"));
+            }
+            Ok(Msg::CommandLineRan { line }) => seen.push(format!("ran {line}")),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    seen
+}
+
+/// A line that waits for a key partway through, in a nested command line
+/// (`input()`) or for one key (`getchar()`), reports nothing while it
+/// waits, and is reported once the key is given and the line has run.
+#[test]
+fn a_line_waiting_for_a_key_is_reported_once_it_has_run() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_claims(&rx);
+    for (line, answer, want) in [
+        (
+            ":call input('q') | View after input<CR>",
+            "y<CR>",
+            vec![
+                "invoke after input",
+                "ran call input('q') | View after input",
+            ],
+        ),
+        (
+            ":call getchar() | View after getchar<CR>",
+            "z",
+            vec![
+                "invoke after getchar",
+                "ran call getchar() | View after getchar",
+            ],
+        ),
+    ] {
+        engine.handle.input(line).unwrap();
+        assert_eq!(
+            arriving_within(&rx, Duration::from_millis(300)),
+            Vec::<String>::new(),
+            "reported while waiting for a key: {line}"
+        );
+        engine.handle.input(answer).unwrap();
+        assert_eq!(until_line_ran(&rx), want, "{line}");
+    }
+}
+
+/// Clearing view's autocmd group removes the report, and registering the
+/// command again puts it back: the line after the registration is
+/// reported. The clearing line's own report, made before it ran, still
+/// arrives, and it names that line.
+#[test]
+fn registering_the_command_again_restores_the_report() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_claims(&rx);
+    engine
+        .handle
+        .input(":autocmd! view_line_ran<CR>:View one x<CR>")
+        .unwrap();
+    assert_eq!(
+        arriving_within(&rx, Duration::from_millis(300)),
+        vec!["invoke one x", "ran autocmd! view_line_ran"],
+        "a line was reported with the group cleared"
+    );
+    engine.handle.register_command().unwrap();
+    // `nvim_input` reaches typeahead ahead of a queued notification, and
+    // a request is answered only after the notification sent before it
+    engine.handle.eval_str("1").unwrap();
+    engine.handle.input(":View two x<CR>").unwrap();
+    assert_eq!(until_line_ran(&rx), vec!["invoke two x", "ran View two x"]);
+}
+
+/// The report carries the line's first [`LINE_REPORT_CHARS`] characters.
+#[test]
+fn a_long_line_is_reported_cut_to_the_cap() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_claims(&rx);
+    let text = format!("echo '{}'", "é".repeat(LINE_REPORT_CHARS * 4));
+    engine.handle.input(&format!(":{text}<CR>")).unwrap();
+    let want: String = text.chars().take(LINE_REPORT_CHARS).collect();
+    assert_eq!(until_line_ran(&rx), vec![format!("ran {want}")]);
 }
 
 /// The next `Msg::FeatureInvoke` on `rx`, as its feature and verb.

@@ -437,10 +437,15 @@ return {
 /// nothing.
 ///
 /// Every `:` line submitted with `<CR>` is reported back as a `line_ran`
-/// bridge notification carrying the line's text, sent once the line has
-/// run: after every invocation it made, and for a line that failed, ran
-/// nothing or ended at a prompt waiting for a key. A line left with
-/// `<Esc>` and a mapping's `<Cmd>` send none.
+/// bridge notification carrying the line's first
+/// [`LINE_REPORT_CHARS`](view_core::native::submit_hold::LINE_REPORT_CHARS)
+/// characters, sent once the line has returned to nvim's main loop: after
+/// every invocation it made, after any `:sleep`, `vim.wait`, `input()` or
+/// `getchar()` it ran, and for a line that failed, ran nothing or left
+/// nvim in insert or terminal mode. Under a UI that draws nvim's own
+/// messages, a line that ends at a hit-enter or more prompt is reported
+/// at the prompt. A line left with `<Esc>` and a mapping's `<Cmd>` send
+/// none.
 pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
 local channel, entries, command = ...
 local takes_path = { ['dvr export'] = true, ['dvr play'] = true }
@@ -509,25 +514,49 @@ vim.api.nvim_create_autocmd('CmdlineLeave', {
     if vim.v.event.abort then
       return
     end
-    local line = vim.fn.getcmdline()
+    local line = vim.fn.strcharpart(vim.fn.getcmdline(), 0, 256)
     local sent = false
-    local function report()
+    local hooks = {}
+    local function send()
       if not sent then
         sent = true
         pcall(vim.rpcnotify, channel, 'view_bridge', 'line_ran', line)
       end
     end
-    -- a line that ends at a prompt holds nvim in a wait that runs nothing
-    -- scheduled until a key arrives, and only libuv callbacks see it
+    local function report()
+      send()
+      for _, hook in ipairs(hooks) do
+        pcall(vim.api.nvim_del_autocmd, hook)
+      end
+    end
+    -- `:sleep` and `vim.wait` run events inside the line and are never
+    -- safe; an `input()` the line waits in is safe in command-line mode
+    hooks[1] = vim.api.nvim_create_autocmd('SafeState', {
+      callback = function()
+        if vim.fn.mode() ~= 'c' then
+          report()
+        end
+      end,
+    })
+    -- terminal mode is never safe
+    hooks[2] = vim.api.nvim_create_autocmd('TermEnter', { callback = report })
+    local prompts = false
+    for _, ui in ipairs(vim.api.nvim_list_uis()) do
+      prompts = prompts or not ui.ext_messages
+    end
+    if not prompts then
+      return
+    end
+    -- a line that ends at a hit-enter or more prompt waits there unsafe,
+    -- and only a libuv callback sees it
     local waiting = vim.uv.new_prepare()
     waiting:start(function()
       if sent or vim.api.nvim_get_mode().blocking then
         waiting:stop()
         waiting:close()
-        report()
+        send()
       end
     end)
-    vim.schedule(report)
   end,
 })";
 
@@ -629,6 +658,45 @@ impl super::EngineHandle {
             ],
         )
     }
+
+    /// Runs [`REGISTER_COMMAND_CHUNK`] alone over this connection, which
+    /// puts back the `:View` command and its line report after a config
+    /// has cleared nvim's autocmds. Fire-and-forget: nothing answers it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn register_command(&self) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(REGISTER_COMMAND_CHUNK),
+                Value::Array(vec![
+                    Value::from(self.channel_id),
+                    Value::Array(command_entry_values()),
+                    Value::from(COMMAND),
+                ]),
+            ],
+        )
+    }
+}
+
+/// [`command_entries`] as the table [`REGISTER_COMMAND_CHUNK`] takes.
+fn command_entry_values() -> Vec<Value> {
+    command_entries()
+        .map(|(feature, verb, args)| {
+            let mut fields = vec![
+                (Value::from("feature"), Value::from(feature)),
+                (Value::from("verb"), Value::from(verb)),
+            ];
+            if !args.is_empty() {
+                let args = args.iter().map(|arg| Value::from(*arg)).collect();
+                fields.push((Value::from("args"), Value::Array(args)));
+            }
+            Value::Map(fields)
+        })
+        .collect()
 }
 
 /// [`REGISTER_MAPPINGS_CHUNK`]'s five arguments, shared by the call that
@@ -649,23 +717,10 @@ pub(crate) fn mapping_args(specs: &[MappingSpec], channel_id: u64) -> Vec<Value>
             Value::Map(fields)
         })
         .collect();
-    let entries = command_entries()
-        .map(|(feature, verb, args)| {
-            let mut fields = vec![
-                (Value::from("feature"), Value::from(feature)),
-                (Value::from("verb"), Value::from(verb)),
-            ];
-            if !args.is_empty() {
-                let args = args.iter().map(|arg| Value::from(*arg)).collect();
-                fields.push((Value::from("args"), Value::Array(args)));
-            }
-            Value::Map(fields)
-        })
-        .collect();
     vec![
         Value::from(channel_id),
         Value::Array(specs),
-        Value::Array(entries),
+        Value::Array(command_entry_values()),
         Value::from(COMMAND),
         Value::from(REGISTER_COMMAND_CHUNK),
     ]
@@ -736,5 +791,15 @@ mod tests {
             "an Invoke row must carry no keys field, so the chunk falls \
              through to its rpcnotify branch: {fields:?}"
         );
+    }
+
+    /// The chunk cuts the reported line at the length view compares.
+    #[test]
+    fn the_reported_line_is_cut_where_view_compares_it() {
+        let cut = format!(
+            "strcharpart(vim.fn.getcmdline(), 0, {})",
+            view_core::native::submit_hold::LINE_REPORT_CHARS
+        );
+        assert!(REGISTER_COMMAND_CHUNK.contains(&cut), "{cut}");
     }
 }
