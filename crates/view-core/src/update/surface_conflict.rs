@@ -554,7 +554,11 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
 /// The bar is [`take_complaint`]'s, with the identity half left out
 /// because a placement carries none: the rect claims a surface view draws
 /// ([`surfaces::claims_at`]), a channel of that surface is already reported
-/// held, and the startup window or the complaint grace is still open. Every
+/// held, and the startup window or the complaint grace is still open. A
+/// float standing in the corner column of a float already taken this way
+/// ([`surfaces::corner_edge`]) counts as over the message area wherever
+/// down that column it sits: a notifier stacking boxes down the corner
+/// places a late complaint below the area the boxes above it fill. Every
 /// other float -- a picker, a hover, a completion menu, anything outside
 /// that window -- is classified in the same arithmetic and paints on the
 /// frame it arrived for.
@@ -597,39 +601,65 @@ pub(super) fn on_float_placed(
     ) {
         return Vec::new();
     }
-    let Some(surface) = surfaces::claims_window_at(
+    if !surfaces::view_draws(Surface::Messages, model)
+        || (!model.surface_conflicts.startup_window_open()
+            && !model.surface_conflicts.within_complaint_grace())
+    {
+        return Vec::new();
+    }
+    let edge = surfaces::corner_edge(row, col, width, height, model);
+    let over_messages = surfaces::claims_window_at(
         (win, anchor),
         (row, col),
         (width, height),
         surfaces::FloatAnchor::NorthWest,
         model,
-    ) else {
-        return Vec::new();
-    };
-    if surface != Surface::Messages || !surfaces::view_draws(surface, model) {
+    ) == Some(Surface::Messages)
+        || edge.is_some_and(|edge| model.surface_conflicts.continues_stack(edge));
+    if !over_messages {
+        // nvim can place a stack's newest box ahead of the boxes above it
+        // in one batch, so a corner float waits for a box of its column
+        if let Some(edge) = edge {
+            model
+                .surface_conflicts
+                .note_stack_candidate(win, grid, edge);
+        }
         return Vec::new();
     }
-    if !model.surface_conflicts.startup_window_open()
-        && !model.surface_conflicts.within_complaint_grace()
-    {
-        return Vec::new();
-    }
-    if !model.surface_conflicts.channel_held(surface) {
+    take_placed(model, grid, win, edge)
+}
+
+/// Takes a float placed over the message area while a holder of it is
+/// known or suspected, with every float already placed in the same corner
+/// column ([`surfaces::corner_edge`]) during the window: each is held off
+/// the screen, and its rows are asked for once the holder is known.
+fn take_placed(
+    model: &mut Model,
+    grid: crate::grid::registry::GridId,
+    win: u64,
+    edge: Option<i64>,
+) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    if model.surface_conflicts.channel_held(Surface::Messages) {
+        if !model.surface_conflicts.claim_complaint(win, Some(grid)) {
+            return effects;
+        }
+        effects.push(Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win }));
+    } else if !model.surface_conflicts.hold_for_sink_read(win, grid) {
         // the suspected half: until the reading arrives, "no holder is
         // known" and "no holder is there" are the same answer, and a timer
         // firing at a fixed offset from `VimEnter` can beat that round trip
         // over a slow link. Held on the same terms and classified by the
         // reading
-        if model.surface_conflicts.hold_for_sink_read(win, grid) {
-            model.dirty |= model.engine.withhold_float(grid, true);
-        }
-        return Vec::new();
-    }
-    if !model.surface_conflicts.claim_complaint(win, Some(grid)) {
-        return Vec::new();
+        return effects;
     }
     model.dirty |= model.engine.withhold_float(grid, true);
-    vec![Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win })]
+    for (win, grid) in model.surface_conflicts.note_stack_edge(edge) {
+        if model.engine.grids().pane_origin(grid).is_some() {
+            effects.extend(take_placed(model, grid, win, None));
+        }
+    }
+    effects
 }
 
 /// Takes a float into the palette's open command line, and answers whether
@@ -2816,6 +2846,166 @@ mod tests {
             );
             assert!(!painted(&model, 7), "and not one step of it is painted");
         }
+    }
+
+    /// A 118x30 terminal whose nvim grid is 29 rows, with a notifier of the
+    /// user's config standing at `vim.notify`.
+    fn notifier_session() -> Model {
+        let mut model = Model::with_term_size(118, 30);
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![UiEvent::GridResize {
+                grid: 1,
+                width: 118,
+                height: 29,
+            }]),
+        );
+        let _ = notifier_takes_the_messages(&mut model);
+        model
+    }
+
+    fn float_at(grid: u64, win: u64, row: u64, col: u64) -> UiEvent {
+        UiEvent::WinFloatPos {
+            grid,
+            win: crate::events::WinHandle(win),
+            anchor: crate::events::FloatAnchor::NorthWest,
+            anchor_grid: 1,
+            zindex: 50,
+            compindex: 1,
+            screen_row: row,
+            screen_col: col,
+        }
+    }
+
+    fn sized(grid: u64, width: u64, height: u64) -> UiEvent {
+        UiEvent::GridResize {
+            grid,
+            width,
+            height,
+        }
+    }
+
+    /// The first box of a notifier's startup stack, read and closed as the
+    /// complaint it is: three rows in a border, hugging the top-right
+    /// corner.
+    fn first_box_taken(model: &mut Model) {
+        let _ = update(
+            model,
+            Msg::Redraw(vec![sized(7, 4, 5), float_at(7, 1004, 1, 114)]),
+        );
+        let _ = update(
+            model,
+            Msg::FloatRows {
+                win: 1004,
+                lines: vec![String::new(), "a toast".to_owned(), String::new()],
+            },
+        );
+    }
+
+    fn reads(effects: &[Effect], win: u64) -> bool {
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::ReadFloatRows { win: w }) if *w == win))
+    }
+
+    /// The stack a notifier opens at launch: three boxes over the message
+    /// area and a fourth, the complaint, stacked below them and outside it,
+    /// all four in one batch with the newest placed first.
+    #[test]
+    fn a_complaint_stacked_below_the_message_area_is_withheld() {
+        let mut model = notifier_session();
+        first_box_taken(&mut model);
+        let effects = update(
+            &mut model,
+            Msg::Redraw(vec![
+                float_at(7, 1004, 1, 111),
+                sized(10, 3, 10),
+                sized(9, 3, 5),
+                sized(8, 3, 5),
+                sized(7, 7, 5),
+                float_at(10, 1007, 16, 115),
+                float_at(9, 1006, 11, 115),
+                float_at(8, 1005, 6, 115),
+            ]),
+        );
+        for grid in 8..=10 {
+            assert!(!painted(&model, grid), "grid {grid} reached the frame");
+        }
+        assert!(reads(&effects, 1007), "the complaint is read: {effects:?}");
+        let step = update(
+            &mut model,
+            Msg::Redraw(vec![sized(10, 7, 10), float_at(10, 1007, 16, 111)]),
+        );
+        assert!(!painted(&model, 10), "and stays off through its slide");
+        assert!(!reads(&step, 1007), "read once: {step:?}");
+
+        let mut fresh = notifier_session();
+        let effects = update(
+            &mut fresh,
+            Msg::Redraw(vec![
+                sized(10, 3, 10),
+                sized(7, 3, 5),
+                float_at(10, 1007, 16, 115),
+                float_at(7, 1004, 1, 115),
+            ]),
+        );
+        assert!(!painted(&fresh, 10), "placed ahead of the box above it");
+        assert!(reads(&effects, 1007), "{effects:?}");
+    }
+
+    /// Outside the window, or away from the stack's column, a float is
+    /// nobody's complaint and paints on the frame it arrived for.
+    #[test]
+    fn a_float_after_the_window_or_in_another_corner_is_shown() {
+        let mut late = notifier_session();
+        first_box_taken(&mut late);
+        key(&mut late);
+        expire_grace(&mut late);
+        let effects = update(
+            &mut late,
+            Msg::Redraw(vec![sized(10, 3, 10), float_at(10, 1007, 16, 115)]),
+        );
+        assert!(painted(&late, 10), "a float after the window is shown");
+        assert!(!reads(&effects, 1007), "{effects:?}");
+
+        for (row, col) in [(16, 0), (1, 0), (20, 40)] {
+            let mut model = notifier_session();
+            first_box_taken(&mut model);
+            let effects = update(
+                &mut model,
+                Msg::Redraw(vec![sized(11, 30, 5), float_at(11, 1008, row, col)]),
+            );
+            assert!(painted(&model, 11), "({row}, {col}) is shown");
+            assert!(!reads(&effects, 1008), "({row}, {col}): {effects:?}");
+        }
+    }
+
+    /// A notification raised in the stack's column during the window is
+    /// read, closed and shown in view's own toast stack.
+    #[test]
+    fn a_notification_stacked_with_the_complaint_reaches_views_toasts() {
+        let mut model = notifier_session();
+        first_box_taken(&mut model);
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![sized(10, 30, 4), float_at(10, 1007, 16, 88)]),
+        );
+        assert!(!painted(&model, 10));
+        let closed = update(
+            &mut model,
+            Msg::FloatRows {
+                win: 1007,
+                lines: vec!["3 plugin updates are ready".to_owned()],
+            },
+        );
+        assert!(
+            closed
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::CloseFloat { win: 1007 }))),
+            "{closed:?}"
+        );
+        let toasts = format!("{:?}", model.engine.messages.entries);
+        assert!(toasts.contains("3 plugin updates are ready"), "{toasts}");
     }
 
     /// The suspected half of the ruling: before the probe answers, "no

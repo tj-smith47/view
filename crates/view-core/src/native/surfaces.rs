@@ -500,6 +500,36 @@ pub fn over_notice_column(
     landing(row, col, width, height, anchor, model).is_some_and(|(_, over)| over)
 }
 
+/// The outer column of the grid's own notifier corner that a float over
+/// this rect, its top-left corner at `row` and `col`, stands against.
+/// `None` for a float reaching out of that corner column or taller than
+/// half the grid.
+///
+/// Every box a notifier stacks down that corner shares this column,
+/// wherever down the corner the box lands.
+#[must_use]
+pub fn corner_edge(row: i64, col: i64, width: u16, height: u16, model: &Model) -> Option<i64> {
+    let (grid_w, grid_h) = model.engine.grid().size();
+    let (top, left, bottom, right) = span(
+        row,
+        col,
+        width,
+        height,
+        FloatAnchor::NorthWest,
+        grid_w,
+        grid_h,
+    )?;
+    if bottom - top + 1 > i64::from(grid_h) / 2 {
+        return None;
+    }
+    let corner_width = i64::from(notice_column_width(grid_w));
+    if model.notice_anchor().is_left_corner() {
+        (right < corner_width).then_some(left)
+    } else {
+        (left >= i64::from(grid_w) - corner_width).then_some(right)
+    }
+}
+
 /// Where a float over this rect lands, as `(in the command line's rows,
 /// over the notice column)`, or `None` for a rect covering no cell.
 fn landing(
@@ -715,6 +745,16 @@ pub struct SurfaceConflicts {
     /// through the classification a float over a held channel takes at its
     /// placement.
     sink_holds: Vec<(u64, crate::grid::registry::GridId)>,
+    /// The corner columns ([`corner_edge`]) of the floats this engine's
+    /// startup took at their placement, as a complaint or held for the
+    /// sink reading. A notifier counts the boxes it stacked above a late
+    /// one, so the late one lands below the message area, in the same
+    /// column.
+    stack_edges: Vec<i64>,
+    /// The floats placed in a corner column during the window and left on
+    /// screen, with the grid each draws into and its column. nvim can place
+    /// a stack's newest box ahead of the boxes above it in one batch.
+    stack_candidates: Vec<(u64, crate::grid::registry::GridId, i64)>,
     /// Which engine the deadlines armed this session belong to. A timer
     /// thread sleeping on a dead engine's behalf still wakes, and the
     /// expiry it sends names this value as it was when the deadline was
@@ -1011,6 +1051,46 @@ impl SurfaceConflicts {
         true
     }
 
+    /// Notes the corner column of a float just taken at its placement, and
+    /// hands back every float placed in that column earlier in the window
+    /// and left on screen, for the caller to take.
+    pub fn note_stack_edge(
+        &mut self,
+        edge: Option<i64>,
+    ) -> Vec<(u64, crate::grid::registry::GridId)> {
+        let Some(edge) = edge.filter(|edge| !self.stack_edges.contains(edge)) else {
+            return Vec::new();
+        };
+        self.stack_edges.push(edge);
+        let (stacked, rest) = std::mem::take(&mut self.stack_candidates)
+            .into_iter()
+            .partition(|candidate| candidate.2 == edge);
+        self.stack_candidates = rest;
+        stacked
+            .into_iter()
+            .map(|(win, grid, _)| (win, grid))
+            .collect()
+    }
+
+    /// Notes a float placed in corner column `edge` during the window and
+    /// left on screen, which a box of its stack taken later takes with it.
+    pub fn note_stack_candidate(
+        &mut self,
+        win: u64,
+        grid: crate::grid::registry::GridId,
+        edge: i64,
+    ) {
+        self.stack_candidates.retain(|candidate| candidate.0 != win);
+        self.stack_candidates.push((win, grid, edge));
+    }
+
+    /// Whether a float standing in corner column `edge` continues a stack
+    /// this engine already took a float from.
+    #[must_use]
+    pub fn continues_stack(&self, edge: i64) -> bool {
+        self.stack_edges.contains(&edge)
+    }
+
     /// Marks the reading arrived and hands back every float held for it,
     /// for the caller to classify now that the holder is known.
     pub fn read_sink(&mut self) -> Vec<(u64, crate::grid::registry::GridId)> {
@@ -1119,6 +1199,7 @@ impl SurfaceConflicts {
     /// | `complaints` | window handles, and a fresh process issues them from 1000 again: a handle held past the death names one of the replacement's own windows, and the reply to a read of it would file a live window's rows into the history and close it |
     /// | `typed` | the replacement sources the config again, so whatever drew over a surface draws again, and a session that had been typed at would leave those windows stacked beside the re-raised notice |
     /// | `complaint_grace` | a deadline armed against the dead engine's report, and the replacement's own report arms its own |
+    /// | `stack_edges`, `stack_candidates` | the replacement sources the config again, and its notifier stacks its boxes afresh in windows of its own |
     /// | `sink_read`, `sink_holds` | the attach re-reads the message area's replaced global per engine, so the replacement is back inside the window where a float over a native surface is held until that reading lands; the held handles belong to the dead process |
     /// | `generation` | bumped: the dead engine's deadlines are still sleeping in their timer threads, and their expiries must find nobody to answer to |
     /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config draws the same windows -- forgetting it would raise a second notice per window for one conflict |
@@ -1131,6 +1212,8 @@ impl SurfaceConflicts {
         self.complaint_grace = false;
         self.sink_read = false;
         self.sink_holds.clear();
+        self.stack_edges.clear();
+        self.stack_candidates.clear();
         self.held.clear();
         self.generation += 1;
     }

@@ -737,6 +737,14 @@ mod tests {
              placement lands on, for `claims_at`, and paints nothing",
         ),
         (
+            "view-core/src/native/surfaces.rs",
+            "fncorner_edge(row:i64,col:i64,width:u16,height:u16,model:&Model)->Option<i64>{",
+            "engine.grid()",
+            "`corner_edge` places a float nvim just sent against the grid \
+             that placement lands on, for the complaint stack, and paints \
+             nothing",
+        ),
+        (
             "view-core/src/native/speculate.rs",
             "fnfold_cmdline_key(model:&mutModel,notation:&str,now:SpecStamp){",
             "engine.grids()",
