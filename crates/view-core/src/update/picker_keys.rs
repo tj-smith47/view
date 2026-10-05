@@ -3,6 +3,7 @@
 
 use crate::model::{Model, OverlayKind};
 use crate::msg::{Effect, OpenIn, RpcCall};
+use crate::native::picker::Picked;
 use crate::native::submit_hold::hold_for_open;
 
 use super::route::picker_query;
@@ -104,17 +105,32 @@ pub(super) fn picker_key(model: &mut Model, notation: &str) -> Vec<Effect> {
             };
             model.pop_focused_overlay();
             model.dirty = true;
-            let (generation, previous_window, mut effects) = hold_for_open(model);
-            effects.push(Effect::Rpc(RpcCall::OpenPicked {
-                target,
-                how,
-                previous_window,
-                generation,
-            }));
+            let mut effects = open_chosen(model, target, how);
             effects.push(Effect::PickerClose);
             effects
         }
     }
+}
+
+/// Opens `target` in the window `how` names, holding the keys typed behind
+/// it until nvim answers. The windows view claims go with the open, so a
+/// choice made with the cursor in a sidebar never opens inside one.
+pub(super) fn open_chosen(model: &mut Model, target: Picked, how: OpenIn) -> Vec<Effect> {
+    let claimed = model
+        .engine
+        .grids()
+        .native_window_claims()
+        .into_iter()
+        .map(|(win, _)| win)
+        .collect();
+    let (generation, mut effects) = hold_for_open(model);
+    effects.push(Effect::Rpc(RpcCall::OpenPicked {
+        target,
+        how,
+        claimed,
+        generation,
+    }));
+    effects
 }
 
 /// How many result rows the focused picker's list shows: its frame less

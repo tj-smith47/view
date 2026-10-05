@@ -1036,7 +1036,7 @@ mod tests {
             &self,
             _target: &view_core::native::picker::Picked,
             _how: view_core::msg::OpenIn,
-            _previous_window: bool,
+            _claimed: &[view_core::events::WinHandle],
             _generation: u64,
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())

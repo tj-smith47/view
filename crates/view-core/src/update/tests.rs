@@ -17593,16 +17593,16 @@ fn focused_windowed_tree() -> Model {
 
 /// The open `<CR>` sends from the tree, and the generation its answer
 /// carries.
-fn tree_open(effects: &[Effect]) -> (String, bool, u64) {
+fn tree_open(effects: &[Effect]) -> (String, Vec<crate::events::WinHandle>, u64) {
     match effects {
         [Effect::ScheduleSubmitHold {
             generation: held, ..
         }, Effect::Rpc(RpcCall::OpenPicked {
             target: crate::native::picker::Picked::File { path, line: None },
             how: crate::msg::OpenIn::Current,
-            previous_window,
+            claimed,
             generation,
-        })] if held == generation => (path.clone(), *previous_window, *generation),
+        })] if held == generation => (path.clone(), claimed.clone(), *generation),
         other => panic!("expected the tree's open, got {other:?}"),
     }
 }
@@ -17618,14 +17618,14 @@ fn sent_inputs(effects: &[Effect]) -> Vec<String> {
         .collect()
 }
 
-/// `<CR>` on a file in the windowed tree opens it in the window entered
-/// before the tree, and a key typed behind it waits for nvim's answer.
+/// `<CR>` on a file in the windowed tree opens it outside the tree's
+/// window, and a key typed behind it waits for nvim's answer.
 #[test]
 fn a_file_opened_from_the_windowed_tree_holds_the_keys_behind_it() {
     let mut m = focused_windowed_tree();
-    let (path, previous_window, generation) = tree_open(&update(&mut m, key("<CR>")));
+    let (path, claimed, generation) = tree_open(&update(&mut m, key("<CR>")));
     assert!(path.ends_with("a.rs"), "{path}");
-    assert!(previous_window);
+    assert_eq!(claimed, [TREE_WIN]);
     assert!(sent_inputs(&update(&mut m, key("x"))).is_empty());
     // nvim draws the screen the open left before it answers
     let _ = update(&mut m, cursor_to(2));
@@ -17649,7 +17649,7 @@ fn opened_in(generation: u64, window: crate::events::WinHandle) -> Msg {
 /// An open that leaves the cursor in the docked sidebar it was asked from
 /// releases the keys behind it on nvim's answer: a float tree over a
 /// focused docked sidebar, and a docked tree whose window the cursor is
-/// back in (an autocmd returned it, or `wincmd p` found no window to enter).
+/// back in, whatever returned it there.
 #[test]
 fn keys_behind_an_open_that_leaves_the_cursor_in_its_sidebar_go_on_the_answer() {
     let float_tree_over = |start: fn() -> Model| {
@@ -17665,7 +17665,7 @@ fn keys_behind_an_open_that_leaves_the_cursor_in_its_sidebar_go_on_the_answer() 
         );
         m
     };
-    let cases: [(&str, Model, crate::events::WinHandle); 4] = [
+    let cases: [(&str, Model, crate::events::WinHandle); 3] = [
         (
             "float tree over the stream",
             float_tree_over(focused_windowed_notifications),
@@ -17677,24 +17677,60 @@ fn keys_behind_an_open_that_leaves_the_cursor_in_its_sidebar_go_on_the_answer() 
             AGENT_WIN,
         ),
         (
-            "docked tree, cursor returned",
-            focused_windowed_tree(),
-            TREE_WIN,
-        ),
-        (
-            "docked tree, no window before",
+            "docked tree, cursor back in it",
             focused_windowed_tree(),
             TREE_WIN,
         ),
     ];
     for (name, mut m, window) in cases {
-        let (_, previous_window, generation) = tree_open(&update(&mut m, key("<CR>")));
-        assert!(previous_window, "{name}: the file opens inside the sidebar");
+        let (_, claimed, generation) = tree_open(&update(&mut m, key("<CR>")));
+        assert_eq!(
+            claimed,
+            [window],
+            "{name}: the file opens inside the sidebar"
+        );
         let _ = update(&mut m, key("x"));
         assert!(m.submit_hold.is_holding(), "{name}");
         let _ = update(&mut m, opened_in(generation, window));
         assert!(!m.submit_hold.is_holding(), "{name}: held to the bound");
     }
+}
+
+/// An open answered from a sidebar's window while nvim holds the cursor in
+/// its own message area, a hit-enter prompt with `ext_messages` off,
+/// releases the keys behind it there: nvim reads the next key as the
+/// prompt's answer whichever window the open left.
+#[test]
+fn keys_behind_an_open_go_while_the_cursor_is_in_the_message_area() {
+    const MESSAGE_GRID: u64 = 3;
+    let mut m = focused_windowed_tree();
+    let (_, _, generation) = tree_open(&update(&mut m, key("<CR>")));
+    let _ = update(&mut m, key("x"));
+    let prompt = Msg::Redraw(vec![
+        UiEvent::GridResize {
+            grid: MESSAGE_GRID,
+            width: 80,
+            height: 2,
+        },
+        UiEvent::MsgSetPos {
+            grid: MESSAGE_GRID,
+            row: 22,
+            scrolled: false,
+            sep_char: String::new(),
+            zindex: 200,
+            compindex: 1,
+        },
+        UiEvent::GridCursorGoto {
+            grid: MESSAGE_GRID,
+            row: 1,
+            col: 0,
+        },
+        UiEvent::Flush,
+    ]);
+    assert!(sent_inputs(&update(&mut m, prompt)).is_empty());
+    assert!(matches!(m.focus(), Focus::Engine), "{:?}", m.focus());
+    let released = update(&mut m, opened_in(generation, TREE_WIN));
+    assert_eq!(sent_inputs(&released), ["x"], "held to the bound");
 }
 
 /// nvim's answer to an open from a windowed sidebar can arrive ahead of the
@@ -17764,27 +17800,35 @@ fn a_file_opened_from_the_tree_overlay_closes_it_and_holds_the_keys_behind_it() 
             entries: vec![crate::native::tree::TreeEntry::new("a.rs".into(), false, 0)],
         },
     );
-    let (path, previous_window, generation) = tree_open(&update(&mut m, key("<CR>")));
+    let (path, claimed, generation) = tree_open(&update(&mut m, key("<CR>")));
     assert!(path.ends_with("a.rs"), "{path}");
-    assert!(!previous_window);
+    assert!(claimed.is_empty(), "{claimed:?}");
     assert!(m.tree_mut().is_none(), "the tree overlay stayed open");
     assert!(sent_inputs(&update(&mut m, key("x"))).is_empty());
     let released = update(&mut m, Msg::SubmitHoldExpired { generation });
     assert_eq!(sent_inputs(&released), ["x"], "{released:?}");
 }
 
-/// A picker opened while a windowed sidebar holds the cursor opens its file
-/// in the window entered before the sidebar's, for each sidebar kind, and
-/// over an ordinary window in that window.
+/// A picker's open names every window view claims, so nvim opens the file
+/// outside each sidebar, for each sidebar kind, and names none over an
+/// ordinary window.
 #[test]
-fn a_file_chosen_over_a_windowed_sidebar_opens_in_the_window_before_it() {
+fn a_file_chosen_over_a_windowed_sidebar_names_the_windows_view_claims() {
     let cases = [
-        ("tree", focused_windowed_tree as fn() -> Model, true),
-        ("notifications", focused_windowed_notifications, true),
-        ("agent", focused_windowed_agent, true),
-        ("no sidebar", model, false),
+        (
+            "tree",
+            focused_windowed_tree as fn() -> Model,
+            vec![TREE_WIN],
+        ),
+        (
+            "notifications",
+            focused_windowed_notifications,
+            vec![NOTIFICATIONS_WIN],
+        ),
+        ("agent", focused_windowed_agent, vec![AGENT_WIN]),
+        ("no sidebar", model, Vec::new()),
     ];
-    for (name, start, previous) in cases {
+    for (name, start, claims) in cases {
         let mut m = start();
         let _ = update(
             &mut m,
@@ -17804,12 +17848,10 @@ fn a_file_chosen_over_a_windowed_sidebar_opens_in_the_window_before_it() {
         );
         let effects = update(&mut m, key("<CR>"));
         let sent = effects.iter().find_map(|effect| match effect {
-            Effect::Rpc(RpcCall::OpenPicked {
-                previous_window, ..
-            }) => Some(*previous_window),
+            Effect::Rpc(RpcCall::OpenPicked { claimed, .. }) => Some(claimed.clone()),
             _ => None,
         });
-        assert_eq!(sent, Some(previous), "{name}: {effects:?}");
+        assert_eq!(sent, Some(claims), "{name}: {effects:?}");
     }
 }
 

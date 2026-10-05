@@ -209,12 +209,20 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // replayed after the command has run, so the focus it set routes them.
     // A replayed `:View` submit arms a fresh hold, which the rest are then
     // kept behind in order
-    if releases || crate::native::submit_hold::released_by_open(model) {
+    if releases || crate::native::submit_hold::released_by_open(model, cursor_in_messages) {
         for held in model.submit_hold.take_held() {
             effects.extend(update(model, held));
         }
     }
     effects
+}
+
+/// Whether nvim's cursor is in its own message area, which no window holds.
+fn cursor_in_messages(model: &Model) -> bool {
+    let grids = model.engine.grids();
+    grids
+        .cursor_grid()
+        .is_some_and(|grid| grids.draws_messages(grid))
 }
 
 fn update_one(model: &mut Model, msg: Msg) -> Vec<Effect> {

@@ -23,7 +23,7 @@ pub fn open_file(
         path: path.to_owned(),
         line: None,
     };
-    handle.open_picked(&file, view_core::msg::OpenIn::Current, false, 0)
+    handle.open_picked(&file, view_core::msg::OpenIn::Current, &[], 0)
 }
 
 /// How long a live engine in these tests gets to answer one RPC round trip.

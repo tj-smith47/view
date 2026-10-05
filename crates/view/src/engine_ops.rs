@@ -4,6 +4,7 @@
 //! testable against a recording fake instead of a live nvim connection, and
 //! so growing the surface never grows the loop's own file.
 
+use view_core::events::WinHandle;
 use view_core::msg::{
     BufferHandle, HunkMark, OpenIn, OptionValue, ReplyToken, ReplyValue, ReviewOpenTarget,
     TakeoverStep, TextEdit, WinSplit,
@@ -185,14 +186,14 @@ pub trait EngineOps {
     /// fire-and-forget, no reply (see `RpcCall::SelectBuffer`).
     fn select_buffer(&self, buf: u64) -> Result<(), EngineError>;
     /// Opens a file or buffer the picker or the tree chose in the window
-    /// `how` names, after entering the previous window when
-    /// `previous_window`; nvim's answer comes back as `Msg::PickedOpened`
-    /// tagged `generation` (see `RpcCall::OpenPicked`).
+    /// `how` names, never in one of the `claimed` windows; nvim's answer
+    /// comes back as `Msg::PickedOpened` tagged `generation` (see
+    /// `RpcCall::OpenPicked`).
     fn open_picked(
         &self,
         target: &view_core::native::picker::Picked,
         how: OpenIn,
-        previous_window: bool,
+        claimed: &[WinHandle],
         generation: u64,
     ) -> Result<(), EngineError>;
     /// Renames `old_path` to `new_path`, retargeting any open buffer along
@@ -492,10 +493,10 @@ impl EngineOps for EngineHandle {
         &self,
         target: &view_core::native::picker::Picked,
         how: OpenIn,
-        previous_window: bool,
+        claimed: &[WinHandle],
         generation: u64,
     ) -> Result<(), EngineError> {
-        self.open_picked(target, how, previous_window, generation)
+        self.open_picked(target, how, claimed, generation)
     }
     fn rename_file(
         &self,
@@ -749,10 +750,10 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
         &self,
         target: &view_core::native::picker::Picked,
         how: OpenIn,
-        previous_window: bool,
+        claimed: &[WinHandle],
         generation: u64,
     ) -> Result<(), EngineError> {
-        (**self).open_picked(target, how, previous_window, generation)
+        (**self).open_picked(target, how, claimed, generation)
     }
     fn rename_file(
         &self,
@@ -1009,10 +1010,10 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
         &self,
         target: &view_core::native::picker::Picked,
         how: OpenIn,
-        previous_window: bool,
+        claimed: &[WinHandle],
         generation: u64,
     ) -> Result<(), EngineError> {
-        (**self).open_picked(target, how, previous_window, generation)
+        (**self).open_picked(target, how, claimed, generation)
     }
     fn rename_file(
         &self,
@@ -1332,11 +1333,11 @@ impl EngineOps for FakeOps {
         &self,
         target: &view_core::native::picker::Picked,
         how: OpenIn,
-        previous_window: bool,
+        claimed: &[WinHandle],
         generation: u64,
     ) -> Result<(), EngineError> {
         self.record(format!(
-            "open_picked({target:?},{how:?},{previous_window},{generation})"
+            "open_picked({target:?},{how:?},{claimed:?},{generation})"
         ))
     }
     fn rename_file(
@@ -1649,7 +1650,7 @@ impl EngineOps for SlowOps {
         &self,
         _target: &view_core::native::picker::Picked,
         _how: OpenIn,
-        _previous_window: bool,
+        _claimed: &[WinHandle],
         _generation: u64,
     ) -> Result<(), EngineError> {
         Ok(())

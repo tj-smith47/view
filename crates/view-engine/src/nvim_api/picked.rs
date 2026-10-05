@@ -4,12 +4,20 @@ use view_core::msg::OpenIn;
 use view_core::native::picker::Picked;
 
 /// Opens a chosen file or buffer, taking `(path, how, line, buffer,
-/// previous)` as varargs: `how` is the ex command a file opens with
+/// claimed)` as varargs: `how` is the ex command a file opens with
 /// (`edit`, `vsplit`, `split` or `tabedit`), `line` is `0` for none,
 /// `buffer` is the handle of a listed buffer to open, `0` for a file, and
-/// `previous` enters the window nvim had focused before the current one
-/// first. Constant, like every other chunk here: no caller data is
-/// interpolated into the source.
+/// `claimed` lists the windows view paints a sidebar over. Constant, like
+/// every other chunk here: no caller data is interpolated into the source.
+///
+/// A sidebar is a window `claimed` names or one `g:view_native_windows`
+/// records. The record holds a sidebar whose window view has not yet
+/// claimed, and `claimed` holds one whose record a person cleared. From a
+/// sidebar or a float, the open enters an ordinary window first: the one
+/// entered before the current window, else the first in the layout. With
+/// none left, the file opens in a new window split off beside the sidebar,
+/// on the side away from the screen's edge, and a refused open makes no
+/// window.
 ///
 /// A file reaches `nvim_cmd` as an argument with filename magic off, so a
 /// space, `%`, `#`, `\` or a leading `+` in its name is no command syntax
@@ -34,10 +42,45 @@ use view_core::native::picker::Picked;
 /// Returns the handle of the window the cursor is in once the open has
 /// run, whether it opened anything or not.
 pub(super) const OPEN_PICKED_CHUNK: &str = "\
-local path, how, line, buffer, previous = ...
+local path, how, line, buffer, claimed = ...
 local here = vim.api.nvim_get_current_win
-if previous then
-  pcall(vim.cmd, 'wincmd p')
+local sidebar, edge = {}, {}
+for _, win in ipairs(claimed) do
+  sidebar[win] = true
+end
+for _, held in pairs(vim.g.view_native_windows or {}) do
+  sidebar[held.win] = true
+  edge[held.win] = held.edge
+end
+local function docked(win)
+  return vim.api.nvim_win_get_config(win).relative == ''
+end
+local function ordinary(win)
+  return not sidebar[win] and docked(win)
+end
+local beside = nil
+if not ordinary(here()) then
+  local before = vim.fn.win_getid(vim.fn.winnr('#'))
+  local into = before ~= 0 and ordinary(before) and before or nil
+  local fallback = nil
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if into == nil and ordinary(win) then
+      into = win
+    end
+    fallback = fallback or docked(win) and win or nil
+  end
+  if into ~= nil then
+    vim.api.nvim_set_current_win(into)
+  elseif how ~= 'tabedit' then
+    if not docked(here()) then
+      vim.api.nvim_set_current_win(fallback)
+    end
+    local across = edge[here()] == 'above' or edge[here()] == 'below'
+    local toward = across and 'k' or 'h'
+    beside = vim.fn.winnr(toward) == vim.fn.winnr() and 'belowright'
+      or 'aboveleft'
+    how = across and 'split' or 'vsplit'
+  end
 end
 if vim.api.nvim_get_mode().mode:sub(1, 2) == 'no' then
   vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'ni', false)
@@ -54,13 +97,15 @@ if buffer > 0 then
   end
   local split = { vsplit = 'vertical sbuffer ', split = 'sbuffer ',
     tabedit = 'tab sbuffer ' }
-  ok, err = pcall(vim.cmd, (split[how] or 'buffer ') .. buffer)
+  ok, err = pcall(vim.cmd,
+    (beside and beside .. ' ' or '') .. (split[how] or 'buffer ') .. buffer)
 elseif not vim.uv.fs_stat(path) then
   say(path .. ' no longer exists')
   return here()
 else
   ok, err = pcall(vim.api.nvim_cmd, {
     cmd = how, args = { path }, magic = { file = false, bar = false },
+    mods = { split = beside },
   }, {})
 end
 if not ok then
@@ -73,6 +118,18 @@ if line > 0 then
 end
 vim.cmd.redraw()
 return here()";
+
+/// The window [`OPEN_PICKED_CHUNK`]'s reply names the cursor in, or `None`
+/// for an error reply.
+pub(crate) fn decode_open_reply(
+    error: &rmpv::Value,
+    result: &rmpv::Value,
+) -> Option<view_core::events::WinHandle> {
+    error
+        .is_nil()
+        .then(|| super::native_window::decode_native_window_reply(result))
+        .flatten()
+}
 
 /// The ex command [`OPEN_PICKED_CHUNK`] opens a file with for `how`.
 fn command(how: OpenIn) -> &'static str {
@@ -87,8 +144,9 @@ fn command(how: OpenIn) -> &'static str {
 impl super::EngineHandle {
     /// Opens `target` in the window `how` names via [`OPEN_PICKED_CHUNK`]:
     /// a file by its path, the cursor on its line when it has one, and a
-    /// listed buffer by its handle. With `previous_window`, the window nvim
-    /// had focused before the current one is entered first.
+    /// listed buffer by its handle. A choice made while the cursor is in
+    /// one of the `claimed` windows, or in a window nvim's record of view's
+    /// own windows names, opens in an ordinary window.
     ///
     /// Async: nvim's answer is routed as `Msg::PickedOpened` carrying
     /// `generation` and the window the cursor ended in, whatever the open
@@ -104,7 +162,7 @@ impl super::EngineHandle {
         &self,
         target: &Picked,
         how: OpenIn,
-        previous_window: bool,
+        claimed: &[view_core::events::WinHandle],
         generation: u64,
     ) -> Result<(), crate::handle::EngineError> {
         let (path, line, buffer) = match target {
@@ -121,7 +179,9 @@ impl super::EngineHandle {
                     rmpv::Value::from(command(how)),
                     rmpv::Value::from(line),
                     rmpv::Value::from(buffer),
-                    rmpv::Value::from(previous_window),
+                    rmpv::Value::Array(
+                        claimed.iter().map(|win| rmpv::Value::from(win.0)).collect(),
+                    ),
                 ]),
             ],
             crate::handle::Waiter::Opened { generation },

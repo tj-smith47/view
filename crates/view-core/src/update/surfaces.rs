@@ -12,7 +12,6 @@ use crate::native::geometry::{Anchor, NativeSurface, OverlayBox};
 use crate::native::keys::{Action, Resolved};
 use crate::native::palette::MessageHistoryState;
 use crate::native::picker::Picked;
-use crate::native::submit_hold::hold_for_open;
 
 use super::path_to_wire;
 use super::route::take_binding;
@@ -1387,17 +1386,11 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Option<Vec<Effect>>
             if !model.tree_is_windowed() {
                 model.pop_focused_overlay();
             }
-            let (generation, previous_window, mut effects) = hold_for_open(model);
-            effects.push(Effect::Rpc(RpcCall::OpenPicked {
-                target: Picked::File {
-                    path: path_to_wire(&path),
-                    line: None,
-                },
-                how: OpenIn::Current,
-                previous_window,
-                generation,
-            }));
-            effects
+            let target = Picked::File {
+                path: path_to_wire(&path),
+                line: None,
+            };
+            super::picker_keys::open_chosen(model, target, OpenIn::Current)
         }
         // opens the blocked-engine Prompt overlay through
         // the entry's own RpcCall (`vim.fn.input` primed

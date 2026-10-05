@@ -1420,9 +1420,11 @@ pub fn released_by_input(model: &Model) -> bool {
 /// answer says the cursor is in. nvim reports the cursor's new window on
 /// the flush after its answer, and the keys are routed by where view last
 /// read the cursor, so either can arrive last. An overlay holding the
-/// keyboard takes the keys wherever the cursor is.
+/// keyboard takes the keys wherever the cursor is, and so does nvim's
+/// message area (`in_messages`), where nvim reads the next key as a
+/// prompt's answer.
 #[must_use]
-pub(crate) fn released_by_open(model: &Model) -> bool {
+pub(crate) fn released_by_open(model: &Model, in_messages: fn(&Model) -> bool) -> bool {
     let Some((
         Armed::Open {
             answered: Some(lands_in),
@@ -1434,21 +1436,17 @@ pub(crate) fn released_by_open(model: &Model) -> bool {
     };
     match model.focus() {
         Focus::Pane(surface) => lands_in == Some(surface),
-        Focus::Engine => lands_in.is_none(),
+        Focus::Engine => lands_in.is_none() || in_messages(model),
         Focus::Native(_) => true,
     }
 }
 
 /// Holds the input that follows an open of a picked file or buffer until
 /// nvim answers the open, on [`arm`]'s bound. Returns the generation the
-/// open carries to nvim, whether the open enters the window before the
-/// current one first, and the effect arming the bound. The window is
-/// entered when the cursor sits in a docked surface's window, where the
-/// file does not belong.
-pub(crate) fn hold_for_open(model: &mut Model) -> (u64, bool, Vec<Effect>) {
-    let previous_window = matches!(model.focus(), Focus::Pane(_));
+/// open carries to nvim and the effect arming the bound.
+pub(crate) fn hold_for_open(model: &mut Model) -> (u64, Vec<Effect>) {
     let effects = arm(model, Armed::Open { answered: None });
-    (model.submit_hold.generation, previous_window, effects)
+    (model.submit_hold.generation, effects)
 }
 
 /// Starts a hold, bounded by the link's own backstop so a command that

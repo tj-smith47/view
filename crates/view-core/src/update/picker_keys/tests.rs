@@ -71,10 +71,10 @@ fn opened(effects: &[Effect]) -> (Picked, OpenIn) {
         }, Effect::Rpc(RpcCall::OpenPicked {
             target,
             how,
-            previous_window: false,
+            claimed,
             generation,
         }), Effect::PickerClose]
-            if held == generation =>
+            if held == generation && claimed.is_empty() =>
         {
             (target.clone(), *how)
         }

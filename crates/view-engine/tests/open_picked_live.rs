@@ -9,7 +9,9 @@ mod common;
 use std::sync::mpsc;
 
 use rmpv::Value;
-use view_core::msg::OpenIn;
+use view_core::events::WinHandle;
+use view_core::msg::{OpenIn, WinSplit};
+use view_core::native::geometry::NativeSurface;
 use view_core::native::picker::Picked;
 use view_engine::process::{Engine, EngineConfig};
 
@@ -81,7 +83,7 @@ fn a_file_opens_at_its_line_in_each_window_a_key_names() {
             path: name.clone(),
             line: Some(3),
         };
-        engine.handle.open_picked(&picked, how, false, 0).unwrap();
+        engine.handle.open_picked(&picked, how, &[], 0).unwrap();
         let (current, line, wins, tabpages) = state(&engine);
         assert!(same_file(&current, &path), "{how:?}: {current}");
         assert_eq!(line, 3, "{how:?}");
@@ -102,7 +104,7 @@ fn a_line_past_the_end_lands_on_the_last_line() {
     };
     engine
         .handle
-        .open_picked(&picked, OpenIn::Current, false, 0)
+        .open_picked(&picked, OpenIn::Current, &[], 0)
         .unwrap();
     assert_eq!(state(&engine).1, 2);
     let _ = std::fs::remove_dir_all(&root);
@@ -147,7 +149,7 @@ fn a_listed_buffer_and_each_of_two_unnamed_ones_open_by_handle() {
         common::open_file(&engine.handle, &name).unwrap();
 
         let picked = Picked::Buffer { handle: second };
-        engine.handle.open_picked(&picked, how, false, 0).unwrap();
+        engine.handle.open_picked(&picked, how, &[], 0).unwrap();
         assert_eq!(current_buffer(&engine), second, "{how:?}: the second");
         let (_, _, wins, tabpages) = state(&engine);
         assert_eq!((wins, tabpages), (windows, tabs), "{how:?}");
@@ -155,7 +157,7 @@ fn a_listed_buffer_and_each_of_two_unnamed_ones_open_by_handle() {
         let picked = Picked::Buffer { handle: listed };
         engine
             .handle
-            .open_picked(&picked, OpenIn::Current, false, 0)
+            .open_picked(&picked, OpenIn::Current, &[], 0)
             .unwrap();
         assert!(same_file(&state(&engine).0, &path), "{how:?}: the file");
     }
@@ -232,7 +234,7 @@ fn an_open_that_cannot_happen_is_answered_and_says_why() {
     };
     engine
         .handle
-        .open_picked(&deleted, OpenIn::Current, false, 1)
+        .open_picked(&deleted, OpenIn::Current, &[], 1)
         .unwrap();
     assert!(
         answered(&engine, &rx, 1),
@@ -252,7 +254,7 @@ fn an_open_that_cannot_happen_is_answered_and_says_why() {
     let wiped = Picked::Buffer { handle: closed };
     engine
         .handle
-        .open_picked(&wiped, OpenIn::Vertical, false, 2)
+        .open_picked(&wiped, OpenIn::Vertical, &[], 2)
         .unwrap();
     assert!(
         answered(&engine, &rx, 2),
@@ -269,7 +271,7 @@ fn an_open_that_cannot_happen_is_answered_and_says_why() {
     };
     engine
         .handle
-        .open_picked(&refused, OpenIn::Current, false, 3)
+        .open_picked(&refused, OpenIn::Current, &[], 3)
         .unwrap();
     assert!(
         answered(&engine, &rx, 3),
@@ -300,9 +302,10 @@ fn a_file_chosen_from_a_sidebar_opens_in_the_window_before_it() {
         path: path.to_string_lossy().into_owned(),
         line: None,
     };
+    let claimed = [current_window(&engine)];
     engine
         .handle
-        .open_picked(&picked, OpenIn::Current, true, 0)
+        .open_picked(&picked, OpenIn::Current, &claimed, 0)
         .unwrap();
     assert!(answered(&engine, &rx, 0), "the open was never answered");
     assert!(same_file(&state(&engine).0, &path));
@@ -313,6 +316,128 @@ fn a_file_chosen_from_a_sidebar_opens_in_the_window_before_it() {
         .as_i64()
         .unwrap();
     assert!(sidebar > 0, "the sidebar lost its buffer");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A sidebar view opened on `split`, entered.
+fn sidebar(engine: &Engine, surface: NativeSurface, split: WinSplit) -> WinHandle {
+    engine
+        .handle
+        .open_native_window_sync(surface, split, 30, true)
+        .unwrap()
+        .expect("the sidebar opened")
+}
+
+/// The window the cursor is in.
+fn current_window(engine: &Engine) -> WinHandle {
+    WinHandle(
+        engine
+            .handle
+            .request("nvim_eval", vec![Value::from("win_getid()")])
+            .unwrap()
+            .as_u64()
+            .unwrap(),
+    )
+}
+
+/// Whether `win` still shows the scratch buffer view opened it with.
+fn keeps_its_buffer(engine: &Engine, win: WinHandle, surface: NativeSurface) -> bool {
+    let filetype = engine
+        .handle
+        .request(
+            "nvim_eval",
+            vec![Value::from(format!(
+                "getbufvar(winbufnr({}), '&filetype')",
+                win.0
+            ))],
+        )
+        .unwrap();
+    filetype.as_str() == Some(&format!("view-{}", surface.id()))
+}
+
+/// Chosen from a sidebar entered from another sidebar, a file opens in the
+/// ordinary window, whether view's claims or nvim's own record of the
+/// sidebars names them.
+#[test]
+fn a_file_chosen_from_a_sidebar_entered_from_another_opens_in_the_ordinary_window() {
+    let root = scratch_root("two-sidebars");
+    let path = root.join("chosen.txt");
+    std::fs::write(&path, "chosen\n").unwrap();
+    for forget_record in [false, true] {
+        let (engine, rx) = spawn_routed();
+        let ordinary = current_window(&engine);
+        let agent = sidebar(&engine, NativeSurface::Agent, WinSplit::Right);
+        let tree = sidebar(&engine, NativeSurface::Tree, WinSplit::Left);
+        let claimed = if forget_record {
+            engine
+                .handle
+                .command("let g:view_native_windows = {}")
+                .unwrap();
+            vec![agent, tree]
+        } else {
+            Vec::new()
+        };
+        let picked = Picked::File {
+            path: path.to_string_lossy().into_owned(),
+            line: None,
+        };
+        engine
+            .handle
+            .open_picked(&picked, OpenIn::Current, &claimed, 0)
+            .unwrap();
+        assert!(answered(&engine, &rx, 0), "the open was never answered");
+        assert_eq!(current_window(&engine), ordinary, "{forget_record}");
+        assert!(same_file(&state(&engine).0, &path), "{forget_record}");
+        assert!(keeps_its_buffer(&engine, agent, NativeSurface::Agent));
+        assert!(keeps_its_buffer(&engine, tree, NativeSurface::Tree));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// With every ordinary window closed, a file or a buffer chosen from a
+/// sidebar opens in a new window beside it, and each sidebar keeps its
+/// buffer.
+#[test]
+fn with_only_sidebars_on_screen_a_choice_opens_in_a_new_window() {
+    let root = scratch_root("only-sidebars");
+    let path = root.join("chosen.txt");
+    std::fs::write(&path, "chosen\n").unwrap();
+    let file = Picked::File {
+        path: path.to_string_lossy().into_owned(),
+        line: None,
+    };
+    for (picked, how) in [
+        (None, OpenIn::Current),
+        (None, OpenIn::Horizontal),
+        (Some(()), OpenIn::Current),
+    ] {
+        let (engine, rx) = spawn_routed();
+        let ordinary = current_window(&engine);
+        engine.handle.command("call setline(1, 'kept')").unwrap();
+        let kept = current_buffer(&engine);
+        let agent = sidebar(&engine, NativeSurface::Agent, WinSplit::Right);
+        let tree = sidebar(&engine, NativeSurface::Tree, WinSplit::Left);
+        engine
+            .handle
+            .command(&format!("call nvim_win_close({}, v:true)", ordinary.0))
+            .unwrap();
+        let target = match picked {
+            None => file.clone(),
+            Some(()) => Picked::Buffer { handle: kept },
+        };
+        engine.handle.open_picked(&target, how, &[], 0).unwrap();
+        assert!(answered(&engine, &rx, 0), "{how:?}: never answered");
+        let (_, _, wins, _) = state(&engine);
+        assert_eq!(wins, 3, "{target:?} {how:?}: one new window");
+        let now = current_window(&engine);
+        assert!(now != agent && now != tree, "{target:?} {how:?}");
+        match picked {
+            None => assert!(same_file(&state(&engine).0, &path), "{how:?}"),
+            Some(()) => assert_eq!(current_buffer(&engine), kept),
+        }
+        assert!(keeps_its_buffer(&engine, agent, NativeSurface::Agent));
+        assert!(keeps_its_buffer(&engine, tree, NativeSurface::Tree));
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 

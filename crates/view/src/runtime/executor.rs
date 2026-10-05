@@ -428,11 +428,9 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::OpenPicked {
                         target,
                         how,
-                        previous_window,
+                        claimed,
                         generation,
-                    } => self
-                        .ops
-                        .open_picked(&target, how, previous_window, generation),
+                    } => self.ops.open_picked(&target, how, &claimed, generation),
                     RpcCall::RenameFile {
                         old_path,
                         new_path,

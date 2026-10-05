@@ -38,10 +38,45 @@ The cases below ran that call alone, with `cmd = 'edit'`. The shipped chunk,
 verbatim `OPEN_PICKED_CHUNK`:
 
 ```lua
-local path, how, line, buffer, previous = ...
+local path, how, line, buffer, claimed = ...
 local here = vim.api.nvim_get_current_win
-if previous then
-  pcall(vim.cmd, 'wincmd p')
+local sidebar, edge = {}, {}
+for _, win in ipairs(claimed) do
+  sidebar[win] = true
+end
+for _, held in pairs(vim.g.view_native_windows or {}) do
+  sidebar[held.win] = true
+  edge[held.win] = held.edge
+end
+local function docked(win)
+  return vim.api.nvim_win_get_config(win).relative == ''
+end
+local function ordinary(win)
+  return not sidebar[win] and docked(win)
+end
+local beside = nil
+if not ordinary(here()) then
+  local before = vim.fn.win_getid(vim.fn.winnr('#'))
+  local into = before ~= 0 and ordinary(before) and before or nil
+  local fallback = nil
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if into == nil and ordinary(win) then
+      into = win
+    end
+    fallback = fallback or docked(win) and win or nil
+  end
+  if into ~= nil then
+    vim.api.nvim_set_current_win(into)
+  elseif how ~= 'tabedit' then
+    if not docked(here()) then
+      vim.api.nvim_set_current_win(fallback)
+    end
+    local across = edge[here()] == 'above' or edge[here()] == 'below'
+    local toward = across and 'k' or 'h'
+    beside = vim.fn.winnr(toward) == vim.fn.winnr() and 'belowright'
+      or 'aboveleft'
+    how = across and 'split' or 'vsplit'
+  end
 end
 if vim.api.nvim_get_mode().mode:sub(1, 2) == 'no' then
   vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'ni', false)
@@ -58,13 +93,15 @@ if buffer > 0 then
   end
   local split = { vsplit = 'vertical sbuffer ', split = 'sbuffer ',
     tabedit = 'tab sbuffer ' }
-  ok, err = pcall(vim.cmd, (split[how] or 'buffer ') .. buffer)
+  ok, err = pcall(vim.cmd,
+    (beside and beside .. ' ' or '') .. (split[how] or 'buffer ') .. buffer)
 elseif not vim.uv.fs_stat(path) then
   say(path .. ' no longer exists')
   return here()
 else
   ok, err = pcall(vim.api.nvim_cmd, {
     cmd = how, args = { path }, magic = { file = false, bar = false },
+    mods = { split = beside },
   }, {})
 end
 if not ok then

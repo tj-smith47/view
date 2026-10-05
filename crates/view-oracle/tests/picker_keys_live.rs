@@ -269,9 +269,18 @@ fn a_key_typed_right_after_choosing_from_the_picker_over_a_docked_agent_acts_in_
 /// A session editing [`OLD`] with the docked agent panel opened, trusted
 /// and left, so the next `:View ai open` enters its window.
 fn agent_docked(label: &str) -> (common::ScratchPaths, Tree, PtySession) {
+    agent_docked_with(label, &[])
+}
+
+/// [`agent_docked`] with `env` also set on the process.
+fn agent_docked_with(
+    label: &str,
+    env: &[(&str, &str)],
+) -> (common::ScratchPaths, Tree, PtySession) {
     // an agent no build provides, so a stray prompt launches nothing
-    let (paths, tree, mut session) =
-        editing_old_with(label, &[AGENT_WINDOWED, ("VIEW_AI_AGENT", "none")]);
+    let mut all = vec![AGENT_WINDOWED, ("VIEW_AI_AGENT", "none")];
+    all.extend_from_slice(env);
+    let (paths, tree, mut session) = editing_old_with(label, &all);
     session.send(b"\x1b:View ai open\r").unwrap();
     assert!(
         session.wait_for("Trust ", budget()),
@@ -391,6 +400,38 @@ fn a_file_chosen_from_the_tree_over_a_docked_agent_opens_beside_the_panel() {
     session
         .send(
             format!("j\r:echo 'wins=' . bufwinnr('{OLD}') . '/' . (bufwinnr('{NEW}') > 0)\r")
+                .as_bytes(),
+        )
+        .unwrap();
+    assert!(
+        session.wait_for("wins=-1/1", budget()),
+        "{NEW} did not replace {OLD} in its window; screen:\n{}",
+        session.screen()
+    );
+}
+
+/// A file chosen in the docked tree entered from the docked agent panel
+/// opens in the window the panel was entered from, and the keys typed in
+/// the same write act there.
+#[test]
+fn a_file_chosen_from_a_docked_tree_entered_from_the_docked_agent_opens_in_the_file_window() {
+    let (_paths, _tree, mut session) =
+        agent_docked_with("docked-tree-from-docked-agent", &[TREE_WINDOWED]);
+    session.send(b"\x1b:View ai open | View tree\r").unwrap();
+    assert!(
+        session.wait_for(NEW, budget()),
+        "the tree never listed {NEW}; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"j\rdd").unwrap();
+    assert!(
+        lines_are(&mut session, "o1,o2,o3|n2,n3"),
+        "the keys behind the open acted elsewhere; screen:\n{}",
+        session.screen()
+    );
+    session
+        .send(
+            format!(":echo 'wins=' . bufwinnr('{OLD}') . '/' . (bufwinnr('{NEW}') > 0)\r")
                 .as_bytes(),
         )
         .unwrap();

@@ -13,6 +13,8 @@ pub(crate) mod native_window;
 mod picked;
 mod window_status;
 
+pub(crate) use picked::decode_open_reply;
+
 use crate::handle::{EngineError, EngineHandle};
 use crate::process::SWAP_RECOVERY_PROBE;
 use crate::rpc::RpcError;

@@ -2474,16 +2474,16 @@ pub enum RpcCall {
     },
     /// Opens `target`, a file the picker or the tree chose or a listed
     /// buffer, in the window `how` names, the cursor on its line when it
-    /// has one. With `previous_window`, the window nvim had focused before
-    /// the current one is entered first, so a file chosen from a sidebar
-    /// opens beside it.
+    /// has one. `claimed` lists the windows view paints a sidebar over. A
+    /// file chosen while the cursor is in one of them opens in an ordinary
+    /// window, or in a new one beside the sidebar when none is left.
     ///
     /// Async: nvim's answer comes back as [`Msg::PickedOpened`] carrying
     /// `generation`, the hold the input typed behind the open waits on.
     OpenPicked {
         target: crate::native::picker::Picked,
         how: OpenIn,
-        previous_window: bool,
+        claimed: Vec<crate::events::WinHandle>,
         generation: u64,
     },
     /// Opens a window for one of view's own surfaces: a scratch buffer no

@@ -2446,7 +2446,8 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(
             ops.calls.borrow()[0],
-            "open_picked(File { path: \"src/main.rs\", line: None },Current,true,7)"
+            "open_picked(File { path: \"src/main.rs\", line: None },Current,\
+             [WinHandle(1001)],7)"
         );
     }
 
@@ -2457,7 +2458,7 @@ mod tests {
                 line: None,
             },
             how: view_core::msg::OpenIn::Current,
-            previous_window: true,
+            claimed: vec![view_core::events::WinHandle(1001)],
             generation: 7,
         }
     }
