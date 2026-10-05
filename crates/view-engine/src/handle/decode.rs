@@ -242,6 +242,9 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         // names only what was mapped when it went out, and a plugin that
         // maps `:` afterwards is what closes the palette's speculation
         // (`REGISTER_MAPPINGS_CHUNK`)
+        "line_ran" => Some(Msg::CommandLineRan {
+            line: first.as_str()?.to_owned(),
+        }),
         "colon_mapped" => Some(Msg::ColonMappingRead {
             mapped: first.as_bool()?,
         }),

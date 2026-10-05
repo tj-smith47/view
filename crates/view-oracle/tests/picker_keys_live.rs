@@ -343,6 +343,29 @@ fn query_new(session: &mut PtySession, open: &[u8]) {
     );
 }
 
+/// Keys typed in the same write as a view command that refuses act in the
+/// file, and the refusal is kept in nvim's messages.
+#[test]
+fn a_key_typed_behind_a_refused_view_command_acts_in_the_file() {
+    let (_paths, _tree, mut session) = editing_old("picker-keys-refused-command");
+    session
+        .send(b"\x1b:View dvr export $VIEW_KEYS_NEVER_SET/x\rdd")
+        .unwrap();
+    assert!(
+        lines_are(&mut session, "o2,o3|"),
+        "the keys behind the refused command acted elsewhere; screen:\n{}",
+        session.screen()
+    );
+    session
+        .send(b":echo 'said=' . (execute('messages') =~# 'NEVER_SET is not set')\r")
+        .unwrap();
+    assert!(
+        session.wait_for("said=1", budget()),
+        "the refusal said nothing; screen:\n{}",
+        session.screen()
+    );
+}
+
 /// A file deleted after the picker listed it says so on screen when
 /// chosen, and the file open before it stays.
 #[test]

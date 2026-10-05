@@ -230,6 +230,14 @@ pub enum Msg {
         feature: String,
         verb: String,
     },
+    /// A `:` command line nvim has finished running, `line` its text as
+    /// submitted. nvim sends it on the channel `:View` notifies on, after
+    /// every invocation the line made, and for a line that failed, ran
+    /// nothing, was refused or ended at a prompt waiting for a key. A line left with `<Esc>`, and a
+    /// mapping's `<Cmd>`, send none.
+    CommandLineRan {
+        line: String,
+    },
     /// The async answer to one [`RpcCall::ProbeSwapRecovery`]: what this
     /// connection's engine replayed out of a swap file while it was
     /// starting, whether it wrote its own report about doing so, and the

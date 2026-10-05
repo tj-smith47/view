@@ -4186,7 +4186,7 @@ mod tests {
                 .collect();
             assert_eq!(sent, line, "tree={tree}: {effects:?}");
 
-            let effects = update(
+            let mut effects = update(
                 &mut model,
                 Msg::FeatureInvoke {
                     generation: None,
@@ -4194,6 +4194,12 @@ mod tests {
                     verb: "open".to_string(),
                 },
             );
+            effects.extend(update(
+                &mut model,
+                Msg::CommandLineRan {
+                    line: "View ai open".to_string(),
+                },
+            ));
             assert!(
                 !effects
                     .iter()

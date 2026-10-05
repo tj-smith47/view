@@ -93,6 +93,89 @@ fn a_view_command_hands_a_trailing_bar_command_to_nvim() {
     );
 }
 
+/// The invocations and finished command lines on `rx`, in the order they
+/// arrive, up to and including the first finished line.
+fn until_line_ran(rx: &mpsc::Receiver<Msg>) -> Vec<String> {
+    let mut seen = Vec::new();
+    loop {
+        match rx.recv_timeout(view_test_support::host_deadline(TICK)) {
+            Ok(Msg::FeatureInvoke { feature, verb, .. }) => {
+                seen.push(format!("invoke {feature} {verb}"));
+            }
+            Ok(Msg::CommandLineRan { line }) => {
+                seen.push(format!("ran {line}"));
+                return seen;
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                panic!("no Msg::CommandLineRan arrived within the deadline: {seen:?}")
+            }
+        }
+    }
+}
+
+/// nvim reports a submitted `:` line once it has run, after every
+/// invocation the line made: a chained line, a line built by `:execute`, a
+/// branch, a refused view command, an unknown command, an empty line and a
+/// line a mapping types. A line left with `<Esc>` and a mapping's `<Cmd>`
+/// report nothing, so the next report is the next submitted line's.
+#[test]
+fn a_submitted_line_is_reported_after_the_invocations_it_made() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_claims(&rx);
+    engine
+        .handle
+        .command("nnoremap Q <Cmd>View cmd map<CR> | nnoremap K :View typed map<CR>")
+        .unwrap();
+    let refused = ":View dvr export $VIEW_LINE_RAN_NEVER_SET/x<CR>";
+    let refused_ran = "ran View dvr export $VIEW_LINE_RAN_NEVER_SET/x";
+    for (keys, want) in [
+        (
+            ":View tree open<CR>",
+            vec!["invoke tree open", "ran View tree open"],
+        ),
+        (
+            ":View ai open | View picker files<CR>",
+            vec![
+                "invoke ai open",
+                "invoke picker files",
+                "ran View ai open | View picker files",
+            ],
+        ),
+        (
+            ":exe 'View ai open' | View picker files<CR>",
+            vec![
+                "invoke ai open",
+                "invoke picker files",
+                "ran exe 'View ai open' | View picker files",
+            ],
+        ),
+        (
+            ":if 1 | View a b | else | View c d | endif<CR>",
+            vec![
+                "invoke a b",
+                "ran if 1 | View a b | else | View c d | endif",
+            ],
+        ),
+        (refused, vec![refused_ran]),
+        (":NoSuchCommand<CR>", vec!["ran NoSuchCommand"]),
+        (":<CR>", vec!["ran "]),
+        (
+            ":View left out<Esc>:View after esc<CR>",
+            vec!["invoke after esc", "ran View after esc"],
+        ),
+        (
+            "Q:View after cmd<CR>",
+            vec!["invoke cmd map", "invoke after cmd", "ran View after cmd"],
+        ),
+        ("K", vec!["invoke typed map", "ran View typed map"]),
+    ] {
+        engine.handle.input(keys).unwrap();
+        assert_eq!(until_line_ran(&rx), want, "{keys}");
+    }
+}
+
 /// The next `Msg::FeatureInvoke` on `rx`, as its feature and verb.
 fn next_invoke(rx: &mpsc::Receiver<Msg>) -> (String, String) {
     loop {

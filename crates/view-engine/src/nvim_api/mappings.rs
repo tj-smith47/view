@@ -435,6 +435,12 @@ return {
 /// the path once it is set. `$$x` is refused as `$x is not set` on every
 /// platform, since nvim reads `$x` there once `x` is set. A refusal writes
 /// nothing.
+///
+/// Every `:` line submitted with `<CR>` is reported back as a `line_ran`
+/// bridge notification carrying the line's text, sent once the line has
+/// run: after every invocation it made, and for a line that failed, ran
+/// nothing or ended at a prompt waiting for a key. A line left with
+/// `<Esc>` and a mapping's `<Cmd>` send none.
 pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
 local channel, entries, command = ...
 local takes_path = { ['dvr export'] = true, ['dvr play'] = true }
@@ -494,6 +500,34 @@ end, {
     end
     table.sort(out)
     return out
+  end,
+})
+vim.api.nvim_create_autocmd('CmdlineLeave', {
+  group = vim.api.nvim_create_augroup('view_line_ran', { clear = true }),
+  pattern = ':',
+  callback = function()
+    if vim.v.event.abort then
+      return
+    end
+    local line = vim.fn.getcmdline()
+    local sent = false
+    local function report()
+      if not sent then
+        sent = true
+        pcall(vim.rpcnotify, channel, 'view_bridge', 'line_ran', line)
+      end
+    end
+    -- a line that ends at a prompt holds nvim in a wait that runs nothing
+    -- scheduled until a key arrives, and only libuv callbacks see it
+    local waiting = vim.uv.new_prepare()
+    waiting:start(function()
+      if sent or vim.api.nvim_get_mode().blocking then
+        waiting:stop()
+        waiting:close()
+        report()
+      end
+    end)
+    vim.schedule(report)
   end,
 })";
 

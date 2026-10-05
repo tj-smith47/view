@@ -5,7 +5,9 @@
 //! about it, while the keys typed behind them are already on their way.
 //! Routed as they arrive, they reach nvim as normal-mode commands in the
 //! buffer the panel was opened from. Holding them until the invocation's
-//! notification comes back lets the focus it sets decide where they go.
+//! notification comes back lets the focus it sets decide where they go. A
+//! submitted line holds them until nvim reports the whole line has run,
+//! which follows every invocation the line made.
 //!
 //! Over a slow link a query typed ahead still reaches the buffer when an
 //! answer to an earlier key arrives later than the slowest of the recent
@@ -29,7 +31,6 @@
 //! reports, `<Left>` in insert mode, leaves such a hold to its bound.
 
 pub mod commands;
-mod refused;
 mod typed_ahead;
 mod user_run;
 
@@ -38,7 +39,7 @@ use std::time::Duration;
 pub(crate) use typed_ahead::owed_after;
 pub(crate) use user_run::canonical_typed;
 
-use commands::view_commands;
+use commands::names_view;
 
 use crate::events::UiEvent;
 use crate::model::{CmdlineState, Focus, Model};
@@ -79,9 +80,8 @@ pub const OWES_AFTER: [(&str, &str, &str); 6] = [
 /// What armed a standing hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Armed {
-    /// A submitted `:View` command line, `owed` the invocations its view
-    /// commands have yet to send.
-    Command { owed: usize },
+    /// A submitted `:View` command line, until nvim reports it has run.
+    Command,
     /// A key sequence nvim maps to a view invocation.
     Sequence,
     /// An open the picker or the tree asked nvim for. A key typed behind
@@ -703,25 +703,25 @@ impl SubmitHold {
     }
 
     /// Ends the tracked line when the key just typed into it completed a
-    /// mapping or an abbreviation whose rhs submits it, and says how many
-    /// view commands that line runs.
-    fn submit_by_mapping(&mut self) -> Option<usize> {
+    /// mapping or an abbreviation whose rhs submits it, and says whether
+    /// that line names a view command.
+    fn submit_by_mapping(&mut self) -> bool {
         let Some(Typed::Known(text)) = &self.typed else {
-            return None;
+            return false;
         };
         let submitting = self
             .cmdline_maps
             .iter()
             .any(|map| map.rhs.as_ref().is_some_and(|rhs| rhs.submits));
         if !submitting {
-            return None;
+            return false;
         }
         let line = self.expand_typed(text, false);
         if !line.submits {
-            return None;
+            return false;
         }
         self.end_line(None);
-        Some(view_commands(&line.text))
+        names_view(&line.text)
     }
 
     /// Notes that nvim reported `mode`, which answers every key that left
@@ -902,9 +902,10 @@ impl SubmitHold {
         }
     }
 
-    /// Whether `msg` ends a standing hold: the notification of the last
-    /// view command a line runs (counted down as each arrives), a key
-    /// sequence's own notification, the bound this hold armed, or, for a
+    /// Whether `msg` ends a standing hold: nvim's report that a line naming
+    /// a view command has run, which follows every invocation the line
+    /// made, a key sequence's own notification, the bound this hold armed,
+    /// or, for a
     /// hold a key sequence armed, a batch arriving once the hold is settled
     /// while nvim is out of normal mode, by the batch's own report or else
     /// by `mode`, the last one.
@@ -916,11 +917,10 @@ impl SubmitHold {
             return false;
         };
         match msg {
-            Msg::FeatureInvoke { .. } => match armed {
-                Armed::Command { owed } => *owed == 0,
-                Armed::Sequence => true,
-                Armed::Open { .. } => false,
-            },
+            Msg::FeatureInvoke { .. } => *armed == Armed::Sequence,
+            // a line submitted before this one, whose report can still be
+            // on its way, names no view command or armed a hold of its own
+            Msg::CommandLineRan { line } => *armed == Armed::Command && names_view(line),
             Msg::SubmitHoldExpired { generation } => *generation == self.generation,
             Msg::Redraw(events) => {
                 let mut reported = events
@@ -970,17 +970,12 @@ impl SubmitHold {
     }
 
     /// Keeps `msg` when a hold stands and it is input, handing it back
-    /// otherwise. An invocation behind a command line counts against the
-    /// invocations that line owes.
+    /// otherwise.
     pub fn hold(&mut self, msg: Msg) -> Option<Msg> {
         match (&mut self.held, &msg) {
             (Some((_, held)), Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_)) => {
                 held.push(msg);
                 None
-            }
-            (Some((Armed::Command { owed }, _)), Msg::FeatureInvoke { .. }) => {
-                *owed = owed.saturating_sub(1);
-                Some(msg)
             }
             _ => Some(msg),
         }
@@ -1287,16 +1282,15 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
         let opened = hold.line_opened();
         let states = std::mem::take(&mut hold.states);
         let typed = hold.end_line(None);
-        let owed = submits_view(model, opened, typed.as_ref(), &states);
-        if owed > 0 {
-            return arm(model, Armed::Command { owed });
+        if submits_view(model, opened, typed.as_ref(), &states) {
+            return arm(model, Armed::Command);
         }
     } else if typed.edit(notation) {
         hold.end_line(None);
     } else {
         hold.note_edited();
-        if let Some(owed @ 1..) = hold.submit_by_mapping() {
-            return arm(model, Armed::Command { owed });
+        if hold.submit_by_mapping() {
+            return arm(model, Armed::Command);
         }
     }
     Vec::new()
@@ -1359,7 +1353,7 @@ pub(crate) fn may_open(model: &Model) -> bool {
                 .contains(&model.engine.mode.current.as_str()))
 }
 
-/// How many view commands the line a `<CR>` submits runs, read from the
+/// Whether the line a `<CR>` submits names a view command, read from the
 /// engine's last `cmdline_show` of it, and from the keys view sent where
 /// the engine has shown none or is showing a text those keys gave the line
 /// on the way (`states`), since the keys after it are still in flight.
@@ -1369,7 +1363,7 @@ pub(crate) fn may_open(model: &Model) -> bool {
 /// its keys, and the user's command-line mappings and abbreviations expand
 /// the keys it has not read yet. An abbreviation that ends the line is
 /// expanded by the `<CR>` itself, after nvim's last show of the line.
-fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[State]) -> usize {
+fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[State]) -> bool {
     let hold = &model.submit_hold;
     let shown = model
         .engine
@@ -1383,7 +1377,7 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
                 .collect::<String>()
         });
     let shown_view = |shown: &str| {
-        view_commands(
+        names_view(
             &hold
                 .expand_abbreviation(Line::typed(shown), WordEnd::Submit)
                 .text,
@@ -1393,28 +1387,22 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
         (Some(Typed::Known(_)), Some(shown)) if opened && !in_flight(states, &shown) => {
             shown_view(&shown)
         }
-        (Some(Typed::Known(text)), _) => view_commands(&hold.expand_typed(text, true).text),
-        (_, shown) => shown.map_or(0, |shown| shown_view(&shown)),
+        (Some(Typed::Known(text)), _) => names_view(&hold.expand_typed(text, true).text),
+        (_, shown) => shown.is_some_and(|shown| shown_view(&shown)),
     }
 }
 
-/// Whether `msg` ends the standing hold: the command's own notification,
-/// the bound it armed, a mode that says a key sequence ran no mapping, or
-/// an error nvim reports behind the line that armed it. nvim runs nothing
-/// on a line it refuses (a pattern that does not compile, a bad range, an
-/// unknown command), so no notification follows the error. Only a
-/// submitted line is read for one: a `<Cmd>` mapping leaves the mode
-/// where it was, so nothing orders its error.
+/// Whether `msg` ends the standing hold: nvim's report that the line has
+/// run, the command's own notification, the bound it armed, or a mode
+/// that says a key sequence ran no mapping. nvim reports a line it refuses
+/// (a pattern that does not compile, a bad range, an unknown command, a
+/// view command that refuses) as it reports any other.
 ///
-/// With no hold standing this is two `Option` tests. While a `:View`
-/// line's hold stands, a redraw batch costs what
-/// `refused::reports_error` states.
+/// With no hold standing this is two `Option` tests, and with one standing
+/// a redraw batch costs one pass over its mode changes.
 #[must_use]
 pub fn releases(model: &Model, msg: &Msg) -> bool {
-    let hold = &model.submit_hold;
-    hold.ended_by(msg, &model.engine.mode.current)
-        || matches!(hold.held, Some((Armed::Command { .. }, _)))
-            && matches!(msg, Msg::Redraw(events) if refused::reports_error(model, events))
+    model.submit_hold.ended_by(msg, &model.engine.mode.current)
 }
 
 /// Whether input arriving now ends the standing hold a key sequence armed:
@@ -1466,7 +1454,7 @@ pub(crate) fn hold_for_open(model: &mut Model) -> (u64, Vec<Effect>) {
 /// never reports back releases the keys to wherever focus stands.
 fn arm(model: &mut Model, armed: Armed) -> Vec<Effect> {
     let hold = &mut model.submit_hold;
-    if matches!(armed, Armed::Command { .. }) {
+    if armed == Armed::Command {
         // a line typed by hand runs the next invocation, whatever key last
         // completed one nvim never ran
         let _ = hold.log.take_invoked();
@@ -2131,8 +2119,8 @@ mod tests {
         "i", "l", "e", "s", "<CR>",
     ];
 
-    /// Keys behind the `<CR>` wait for the command's notification, and the
-    /// picker it opened is what they are typed into.
+    /// Keys behind the `<CR>` wait for nvim's report that the line has run,
+    /// and the picker it opened is what they are typed into.
     #[test]
     fn keys_behind_a_submitted_view_command_reach_what_it_opened() {
         let mut model = normal_mode();
@@ -2146,7 +2134,7 @@ mod tests {
         let held = type_keys(&mut model, &["m", "a"]);
         assert!(held.is_empty(), "held keys produce nothing: {held:?}");
 
-        let replayed = crate::update::update(
+        let opened = crate::update::update(
             &mut model,
             Msg::FeatureInvoke {
                 generation: None,
@@ -2154,6 +2142,13 @@ mod tests {
                 verb: "files".to_string(),
             },
         );
+        assert!(
+            !opened
+                .iter()
+                .any(|e| matches!(e, Effect::PickerQuery { needle, .. } if needle == "ma")),
+            "the keys wait for the line's report: {opened:?}"
+        );
+        let replayed = crate::update::update(&mut model, line_ran("View picker files"));
         assert!(inputs(&replayed).is_empty(), "{replayed:?}");
         assert!(
             replayed
@@ -2229,27 +2224,32 @@ mod tests {
         }
     }
 
-    /// An error nvim reports for the submitted line releases the keys held
-    /// behind it in that update, and the update does nothing else a model
-    /// holding no keys would not do.
+    /// nvim's report that it ran `line`.
+    fn line_ran(line: &str) -> Msg {
+        Msg::CommandLineRan {
+            line: line.to_string(),
+        }
+    }
+
+    /// A line nvim refuses runs nothing. Its error leaves the keys held,
+    /// and its report releases them in that update, which does nothing
+    /// else a model holding no keys would not do.
     #[test]
-    fn an_error_on_the_submitted_line_releases_the_keys_at_once() {
+    fn a_line_nvim_refuses_releases_the_keys_on_its_report() {
         use crate::native::ext::Ext;
         let surfaces = || vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages];
-        let batch = || {
-            Msg::Redraw(vec![
-                UiEvent::CmdlineHide { level: 1 },
-                message("emsg", "E54: Unmatched \\("),
-                UiEvent::ModeChange {
-                    mode: "normal".to_string(),
-                    mode_idx: 0,
-                },
-            ])
-        };
+        let error = Msg::Redraw(vec![
+            UiEvent::CmdlineHide { level: 1 },
+            message("emsg", "E54: Unmatched \\("),
+            mode("normal"),
+        ]);
         let mut held = refused_line(surfaces(), &["j", "k"]);
         let mut empty = refused_line(surfaces(), &[]);
-        let released = crate::update::update(&mut held, batch());
-        let alone = crate::update::update(&mut empty, batch());
+        let sent = crate::update::update(&mut held, error);
+        assert!(inputs(&sent).is_empty(), "{sent:?}");
+        assert!(held.submit_hold.is_holding());
+        let released = crate::update::update(&mut held, line_ran("filter /\\(/ View"));
+        let alone = crate::update::update(&mut empty, line_ran("filter /\\(/ View"));
         assert_eq!(inputs(&released), ["j", "k"], "{released:?}");
         assert!(!held.submit_hold.is_holding());
         let rest: Vec<_> = released
@@ -2293,13 +2293,11 @@ mod tests {
         model
     }
 
-    /// A message that is no error releases nothing, and neither does an
-    /// error nvim follows with a mode change into the command line, which
-    /// says it is reading the next line and the error was an earlier
-    /// line's. The batches are nvim 0.12.4's for keys typed inside one
-    /// round trip.
+    /// No message nvim shows while a `:View` line's keys are held releases
+    /// them, an error included, whichever line it belongs to. The batches
+    /// are nvim 0.12.4's for keys typed inside one round trip.
     #[test]
-    fn a_message_that_is_no_error_on_the_line_releases_nothing() {
+    fn no_message_releases_the_keys_behind_a_view_line() {
         use crate::native::ext::Ext;
         let surfaces = || vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages];
         let mut model = refused_line(surfaces(), &["j"]);
@@ -2459,11 +2457,12 @@ mod tests {
         ])
     }
 
-    /// Where nvim draws its own messages, the error is the message row
-    /// opening in `ErrorMsg`, laid over whatever `MsgArea` holds, and
-    /// then the mode leaving the command line.
+    /// Where nvim draws its own messages, an error drawn in `ErrorMsg` on
+    /// the message row, with or without a `MsgArea` background, and the
+    /// mode leaving the command line keep the keys held until the line's
+    /// report.
     #[test]
-    fn an_error_nvim_draws_itself_releases_the_keys() {
+    fn an_error_nvim_draws_itself_keeps_the_keys_until_the_report() {
         use crate::native::ext::Ext;
         let line = |hl_id: u64| UiEvent::GridLine {
             grid: 1,
@@ -2471,19 +2470,12 @@ mod tests {
             col_start: 0,
             cells: vec![cell("E", hl_id), cell("5", hl_id), cell("4", hl_id)],
         };
-        // the ids and colours nvim 0.12.4 sends with and without a
-        // `MsgArea` background
-        for (area_bg, drawn, released) in [
-            (None, line(25), true),
-            (Some(0x22_2222), line(60), true),
-            (None, line(1), false),
-        ] {
+        for (area_bg, drawn) in [(None, line(25)), (Some(0x22_2222), line(60))] {
             let mut model = normal_mode();
             model.attach_surfaces(vec![Ext::LineGrid]);
             let _ = crate::update::update(&mut model, error_highlights(area_bg));
             let _ = type_keys(&mut model, &REFUSED);
             let _ = type_keys(&mut model, &["<CR>", "j"]);
-            assert!(model.submit_hold.is_holding());
             let sent = crate::update::update(
                 &mut model,
                 Msg::Redraw(vec![
@@ -2492,82 +2484,9 @@ mod tests {
                     mode("normal"),
                 ]),
             );
-            let expected: &[&str] = if released { &["j"] } else { &[] };
-            assert_eq!(inputs(&sent), expected, "MsgArea bg {area_bg:?}");
-            assert_eq!(model.submit_hold.is_holding(), !released);
-        }
-    }
-
-    /// Where the message row already shows an error, nvim starts the next
-    /// one at column 1, and the line counts when column 0 is still drawn
-    /// as an error: as the grid holds it, or as a line earlier in the
-    /// batch draws it. The batches are nvim 0.12.4's for `:bogus<CR>` and
-    /// then `:filter /\(/ View`.
-    #[test]
-    fn an_error_nvim_diffs_against_the_one_shown_releases_the_keys() {
-        use crate::native::ext::Ext;
-        let e54 = || UiEvent::GridLine {
-            grid: 1,
-            row: 9,
-            col_start: 1,
-            cells: vec![cell("5", 25), cell("4", 25), cell(":", 25)],
-        };
-        let row_opens = |text: &str, hl_id: u64| UiEvent::GridLine {
-            grid: 1,
-            row: 9,
-            col_start: 0,
-            cells: vec![cell(text, hl_id)],
-        };
-        let cases = [
-            (
-                "E492 on the grid",
-                Some(25),
-                vec![e54(), mode("normal")],
-                true,
-            ),
-            ("a blank row", Some(1), vec![e54(), mode("normal")], false),
-            // the line typed ahead, drained in the same batch
-            (
-                "E492 earlier in the batch",
-                None,
-                vec![
-                    UiEvent::CmdlineHide { level: 1 },
-                    row_opens("E", 25),
-                    shown(":", "filter /\\(/ View"),
-                    mode("cmdline_normal"),
-                    UiEvent::CmdlineHide { level: 1 },
-                    e54(),
-                    mode("normal"),
-                ],
-                true,
-            ),
-            (
-                "a row the batch blanked",
-                Some(25),
-                vec![row_opens(" ", 1), e54(), mode("normal")],
-                false,
-            ),
-            (
-                "a grid the batch cleared",
-                Some(25),
-                vec![UiEvent::GridClear { grid: 1 }, e54(), mode("normal")],
-                false,
-            ),
-        ];
-        for (name, on_grid, batch, released) in cases {
-            let mut model = normal_mode();
-            model.attach_surfaces(vec![Ext::LineGrid, Ext::Cmdline]);
-            let _ = crate::update::update(&mut model, error_highlights(None));
-            if let Some(hl_id) = on_grid {
-                let _ = crate::update::update(&mut model, Msg::Redraw(vec![row_opens("E", hl_id)]));
-            }
-            let _ = type_keys(&mut model, &REFUSED);
-            let _ = type_keys(&mut model, &["<CR>", "j"]);
-            assert!(model.submit_hold.is_holding(), "{name}");
-            let sent = crate::update::update(&mut model, Msg::Redraw(batch));
-            let expected: &[&str] = if released { &["j"] } else { &[] };
-            assert_eq!(inputs(&sent), expected, "{name}");
-            assert_eq!(model.submit_hold.is_holding(), !released, "{name}");
+            assert!(inputs(&sent).is_empty(), "MsgArea bg {area_bg:?}");
+            let sent = crate::update::update(&mut model, line_ran("filter /\\(/ View"));
+            assert_eq!(inputs(&sent), ["j"], "MsgArea bg {area_bg:?}");
         }
     }
 
@@ -2645,11 +2564,11 @@ mod tests {
         assert!(model.submit_hold.is_holding(), "{line}: {sent:?}");
     }
 
-    /// How many invocations `model`'s hold stands through before it ends,
-    /// `None` when it outlasts `invocations`. Each is an invocation of a
-    /// feature no build has, so it opens nothing that would take the keys.
-    fn invocations_to_release(model: &mut Model, invocations: usize) -> Option<usize> {
-        (1..=invocations).find(|_| {
+    /// Applies `invocations` invocations of a feature no build has, which
+    /// open nothing that would take the keys, and says whether the hold
+    /// still stands after every one.
+    fn held_through(model: &mut Model, invocations: usize) -> bool {
+        (0..invocations).all(|_| {
             let _ = crate::update::update(
                 model,
                 Msg::FeatureInvoke {
@@ -2658,41 +2577,51 @@ mod tests {
                     verb: "none".to_string(),
                 },
             );
-            !model.submit_hold.is_holding()
+            model.submit_hold.is_holding()
         })
     }
 
-    /// Keys typed behind a line of chained view commands wait for the last
-    /// command's invocation, and a part that is no view command is owed
-    /// none.
+    /// Keys typed behind a `:View` line wait until nvim reports the line
+    /// has run, however many invocations it sent first: a chain of one,
+    /// two or three, a line mixing view commands with others, a line built
+    /// by `:execute`, a loop and a branch.
     #[test]
-    fn keys_behind_chained_view_commands_wait_for_the_last_one() {
-        for (line, owed) in [
+    fn keys_behind_a_view_line_wait_for_its_report() {
+        for (line, invocations) in [
             ("View ai open", 1),
             ("View ai open | View picker files", 2),
             ("View ai open | View tree | View picker files", 3),
             ("set nu | View picker files", 1),
             ("View picker files | set nu", 1),
-            ("View ai open | normal :View tree", 1),
+            ("View ai open | normal :View tree", 2),
+            ("exe 'View ai open' | View picker files", 2),
+            ("exe 'View ai open'", 1),
+            ("for _ in [1, 2] | View x | endfor", 2),
+            ("if 1 | View a | else | View b | endif", 1),
+            ("if 0 | View a | endif", 0),
         ] {
             let mut model = normal_mode();
             submit(&mut model, line);
-            assert_eq!(invocations_to_release(&mut model, 4), Some(owed), "{line}");
+            assert!(held_through(&mut model, invocations), "{line}");
+            let sent = crate::update::update(&mut model, line_ran("set nu"));
+            assert!(inputs(&sent).is_empty(), "{line}: another line's report");
+            let sent = crate::update::update(&mut model, line_ran(line));
+            assert_eq!(inputs(&sent), ["x"], "{line}");
+            assert!(!model.submit_hold.is_holding(), "{line}");
         }
     }
 
     /// A view command that refuses to run invokes nothing and says why in
-    /// `ErrorMsg`, as an `echomsg` where nvim's messages are attached. The
-    /// keys behind the line go once nvim has drawn that and left the
-    /// command line, after the invocations the line's other commands made.
+    /// `ErrorMsg`. The keys behind its line stay held through that message
+    /// and the other commands' invocations, and go on the line's report.
     #[test]
-    fn keys_behind_a_view_command_that_refuses_go_on_its_message() {
+    fn keys_behind_a_view_command_that_refuses_go_on_the_lines_report() {
         use crate::native::ext::Ext;
+        let line = "View dvr export $NOPE/x | View picker files";
         let mut model = normal_mode();
         model.attach_surfaces(vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages]);
         let _ = crate::update::update(&mut model, error_highlights(None));
-        submit(&mut model, "View dvr export $NOPE/x | View picker files");
-        assert_eq!(invocations_to_release(&mut model, 1), None);
+        submit(&mut model, line);
         let sent = crate::update::update(
             &mut model,
             Msg::Redraw(vec![
@@ -2701,7 +2630,35 @@ mod tests {
                 mode("normal"),
             ]),
         );
-        assert!(!model.submit_hold.is_holding(), "{sent:?}");
+        assert!(inputs(&sent).is_empty(), "{sent:?}");
+        assert!(held_through(&mut model, 1));
+        let sent = crate::update::update(&mut model, line_ran(line));
+        assert_eq!(inputs(&sent), ["x"]);
+    }
+
+    /// An error message unrelated to the line, arriving with a mode change
+    /// while the line still owes an invocation, leaves the keys held.
+    #[test]
+    fn an_unrelated_error_mid_hold_keeps_the_keys() {
+        use crate::native::ext::Ext;
+        let line = "View ai open | View picker files";
+        let mut model = normal_mode();
+        model.attach_surfaces(vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages]);
+        let _ = crate::update::update(&mut model, error_highlights(None));
+        submit(&mut model, line);
+        assert!(held_through(&mut model, 1));
+        for kind in ["emsg", "echoerr", "echomsg", "lua_error"] {
+            let sent = crate::update::update(
+                &mut model,
+                Msg::Redraw(vec![
+                    message(kind, "E5108: a plugin failed"),
+                    mode("normal"),
+                ]),
+            );
+            assert!(inputs(&sent).is_empty(), "{kind}: {sent:?}");
+        }
+        assert!(held_through(&mut model, 1));
+        let sent = crate::update::update(&mut model, line_ran(line));
         assert_eq!(inputs(&sent), ["x"]);
     }
 

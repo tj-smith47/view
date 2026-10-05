@@ -2,22 +2,26 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
-/// How many of the `|`-separated commands on `line` are `View` or an
-/// abbreviation nvim would run as it. `View` ends at a `|`, and any other
-/// command that reads the `|` as its argument ends the reading.
-pub(super) fn view_commands(line: &str) -> usize {
+/// Whether one of the `|`-separated commands on `line` is `View`, an
+/// abbreviation nvim would run as it, or an `:execute` whose expression
+/// spells `View`. A command that reads the `|` as its argument ends the
+/// reading.
+pub(super) fn names_view(line: &str) -> bool {
     let mut rest = line;
-    let mut count = 0;
     loop {
         let command = skip_modifiers(rest);
         let word = command_word(command);
-        let view = word.starts_with('V') && "View".starts_with(word);
-        count += usize::from(view);
-        if !view && takes_bar(command) {
-            return count;
+        let bar = unescaped(command, '|');
+        let built = abbreviates(word, "execute", 3)
+            && command[..bar.unwrap_or(command.len())].contains("View");
+        if word.starts_with('V') && "View".starts_with(word) || built {
+            return true;
         }
-        let Some(bar) = unescaped(command, '|') else {
-            return count;
+        if takes_bar(command) {
+            return false;
+        }
+        let Some(bar) = bar else {
+            return false;
         };
         rest = &command[bar + 1..];
     }
@@ -359,10 +363,10 @@ mod tests {
     #[test]
     fn the_command_word_is_read_with_its_abbreviations() {
         for line in ["View ai open", "Vie ai", "  :View", "View!", "V"] {
-            assert!(view_commands(line) > 0, "{line:?}");
+            assert!(names_view(line), "{line:?}");
         }
         for line in ["", "vim", "Vex", "Views", "set ft=View", "edit View"] {
-            assert_eq!(view_commands(line), 0, "{line:?}");
+            assert!(!names_view(line), "{line:?}");
         }
     }
 
@@ -379,7 +383,7 @@ mod tests {
             "set ft=x\\|y|View",
             "hide|View",
         ] {
-            assert!(view_commands(line) > 0, "{line:?}");
+            assert!(names_view(line), "{line:?}");
         }
         for line in [
             "normal! ihello|View",
@@ -406,7 +410,24 @@ mod tests {
             "/a\\/b/normal x|View",
             "/[/]/normal x|View",
         ] {
-            assert_eq!(view_commands(line), 0, "{line:?}");
+            assert!(!names_view(line), "{line:?}");
+        }
+    }
+
+    /// An `:execute` runs the line its expression builds, so one spelling
+    /// `View` before its own bar names it.
+    #[test]
+    fn a_view_command_built_by_execute_is_read() {
+        for line in [
+            "exe 'View ai open'",
+            "execute \"View\"",
+            "w|exe 'View x' | echo 1",
+            "silent exe 'Vi' . 'ew' | View",
+        ] {
+            assert!(names_view(line), "{line:?}");
+        }
+        for line in ["exe 'echo 1'", "ex View", "exe 'echo 1' | echo 'View'"] {
+            assert!(!names_view(line), "{line:?}");
         }
     }
 
@@ -452,7 +473,7 @@ mod tests {
             "bel View",
             "hor View",
         ] {
-            assert!(view_commands(line) > 0, "{line:?}");
+            assert!(names_view(line), "{line:?}");
         }
         for line in [
             "silent echo 1",
@@ -472,7 +493,7 @@ mod tests {
             "filter «x y« View",
             "filter \u{2014}x y\u{2014} View",
         ] {
-            assert_eq!(view_commands(line), 0, "{line:?}");
+            assert!(!names_view(line), "{line:?}");
         }
     }
 }

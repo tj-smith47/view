@@ -1640,11 +1640,11 @@ fn a_buffer_mapping_set_after_the_buffer_is_entered_is_logged() {
     );
 }
 
-/// A `:View` line nvim refuses runs nothing, so the error it reports for
-/// the line releases the keys held behind it, whichever way nvim hands
+/// A `:View` line nvim refuses runs nothing, and nvim's report that the
+/// line has run releases the keys held behind it, whichever way nvim hands
 /// its messages over, and where the message row already shows an earlier
-/// error the new one is drawn against. The pump never delivers the hold's
-/// own bound, so the release is the error's.
+/// error. The pump never delivers the hold's own bound, so the release is
+/// the report's.
 #[test]
 fn keys_behind_a_view_line_nvim_refuses_reach_nvim_on_its_error() {
     use view_core::native::ext::Ext;
@@ -1718,12 +1718,13 @@ fn keys_behind_a_view_line_nvim_refuses_reach_nvim_on_its_error() {
             if matches!(msg, Msg::FeatureInvoke { .. }) {
                 return Some(Err(format!("{msg:?}")));
             }
-            (!model.submit_hold.is_holding()).then_some(Ok(matches!(msg, Msg::Redraw(_))))
+            (!model.submit_hold.is_holding())
+                .then_some(Ok(matches!(msg, Msg::CommandLineRan { .. })))
         });
         assert_eq!(
             released,
             Some(Ok(true)),
-            "{name}: the error nvim reports must release the held keys"
+            "{name}: the line's report must release the held keys"
         );
         assert_eq!(session.eval("getline(1)"), "hello", "{name}");
         assert_eq!(session.eval("winnr('$')"), "1", "{name}: no window opened");
@@ -1759,8 +1760,8 @@ end
 /// command line, on a screen whose window rows show error signs, typed
 /// with the keys behind it inside one round trip and read in the runtime
 /// loop's order. nvim redraws those rows as it leaves the command line
-/// after the invocation, and the keys wait for the invocation and reach
-/// the composer it opened.
+/// after the invocation, and the keys wait for the line's report, which
+/// follows the invocation, and reach the composer it opened.
 fn keys_behind_a_wrapped_view_line_reach_what_it_opened(session: &Session, model: &mut Model) {
     // the silence watch before this read past redraw tokens without
     // taking their damage, and no token follows until it is taken
@@ -1801,20 +1802,29 @@ fn keys_behind_a_wrapped_view_line_reach_what_it_opened(session: &Session, model
     session.eval("1");
 
     let invoked = std::cell::Cell::new(false);
+    let ran = std::cell::Cell::new(false);
     let left = std::cell::Cell::new(false);
     let observe = |model: &Model, msg: &Msg| {
         match msg {
             Msg::FeatureInvoke { .. } => {
                 assert!(
-                    !model.submit_hold.is_holding(),
-                    "the invocation ends the hold"
+                    model.submit_hold.is_holding(),
+                    "the invocation leaves the keys for the line's report"
                 );
                 invoked.set(true);
             }
+            Msg::CommandLineRan { .. } => {
+                assert!(invoked.get(), "the report came before the invocation");
+                assert!(
+                    !model.submit_hold.is_holding(),
+                    "the line's report ends the hold"
+                );
+                ran.set(true);
+            }
             Msg::Redraw(events) => {
                 assert!(
-                    invoked.get() || model.submit_hold.is_holding(),
-                    "a redraw before the invocation released the keys"
+                    ran.get() || model.submit_hold.is_holding(),
+                    "a redraw before the line's report released the keys"
                 );
                 for event in events {
                     if let UiEvent::ModeChange { mode, .. } = event {
@@ -1824,7 +1834,7 @@ fn keys_behind_a_wrapped_view_line_reach_what_it_opened(session: &Session, model
             }
             _ => {}
         }
-        (invoked.get() && left.get()).then_some(())
+        (ran.get() && left.get()).then_some(())
     };
     let mut done = None;
     for received in arrived.take() {

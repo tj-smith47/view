@@ -871,6 +871,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.record_colon_mapped(mapped);
             Vec::new()
         }
+        Msg::CommandLineRan { .. } => Vec::new(),
         Msg::UserMappingsRead {
             keys,
             timeoutlen,
