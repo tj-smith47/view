@@ -207,14 +207,13 @@ pub(super) fn close_view_surfaces(model: &mut Model) -> Vec<Effect> {
 }
 
 /// Takes every key, paste and click while the scrub is open, so none
-/// reaches the engine. `None` on the live screen, while the branch confirm
-/// takes the keys over the frame it names, and for any other message.
+/// reaches the engine. `None` on the live screen, for a key while the
+/// branch confirm answers keys over the frame it names, and for any other
+/// message.
 pub(super) fn scrub_input(model: &mut Model, msg: &Msg) -> Option<Vec<Effect>> {
     let shown = model.dvr.scrub_frame()?;
-    if model.branch_confirm_focused() {
-        return None;
-    }
     match msg {
+        Msg::Key(_) if model.branch_confirm_focused() => None,
         Msg::Key(key) => Some(scrub_key(model, &key.notation, shown)),
         Msg::Paste(_) | Msg::Mouse(_) => Some(Vec::new()),
         _ => None,
@@ -686,6 +685,73 @@ mod tests {
                 "{answer}: the answer closes it"
             );
             assert_eq!(m.dvr.is_branching(), branches, "{answer}");
+        }
+    }
+
+    #[test]
+    fn a_click_or_paste_under_the_branch_confirm_never_reaches_the_engine() {
+        let mut m = recorded();
+        branch_back(&mut m, 2);
+        checked(&mut m, &[], false);
+        m.note_recorded_frame_painted();
+        let logged = m.dvr.inputs().count();
+        let mut effects = update(&mut m, Msg::Paste("text".to_owned()));
+        effects.extend(update(
+            &mut m,
+            Msg::Mouse(MouseInput {
+                button: "left".to_owned(),
+                action: "press".to_owned(),
+                modifier: String::new(),
+                row: 1,
+                col: 1,
+            }),
+        ));
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(m.dvr.inputs().count(), logged, "nothing is recorded");
+        assert!(prompt_text(&m).is_some(), "the confirm stays up");
+        assert_eq!(m.dvr.scrub_frame(), Some(7), "over the frame it names");
+    }
+
+    #[test]
+    fn backing_out_during_the_disk_check_cancels_the_confirm() {
+        for close in ["q", "<Esc>"] {
+            let mut m = recorded();
+            branch_back(&mut m, 2);
+            let _ = update(&mut m, key(close));
+            assert!(m.dvr.scrub_frame().is_none(), "{close}");
+            assert!(!m.dvr.is_asking(), "{close}: the ask ends with the scrub");
+            checked(&mut m, &[], false);
+            assert!(prompt_text(&m).is_none(), "{close}: no confirm on live");
+
+            let _ = update(&mut m, invoke_msg("scrub"));
+            let _ = m.dvr.take_step();
+            checked(&mut m, &[], false);
+            assert!(prompt_text(&m).is_none(), "{close}: nor on a new scrub");
+            let _ = update(&mut m, key("h"));
+            assert!(m.dvr.take_step().is_some(), "{close}: the scrub moves");
+        }
+    }
+
+    #[test]
+    fn only_closing_acts_while_the_disk_check_runs() {
+        let mut m = recorded();
+        branch_back(&mut m, 2);
+        assert_eq!(disk_checks(&mut m), 1);
+        let _ = std::iter::from_fn(|| m.dvr.take_step()).count();
+        let mut effects = Vec::new();
+        for k in ["e", "b", "h", "l", "g", "G"] {
+            effects.extend(update(&mut m, key(k)));
+        }
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(m.dvr.take_step().is_none(), "no move while asking");
+        assert!(exports(&mut m).is_empty(), "no export while asking");
+        assert_eq!(disk_checks(&mut m), 0, "no second check");
+        assert_eq!(m.dvr.scrub_frame(), Some(7));
+        for close in ["q", "<Esc>"] {
+            let mut m = recorded();
+            branch_back(&mut m, 2);
+            let _ = update(&mut m, key(close));
+            assert!(m.dvr.scrub_frame().is_none(), "{close} closes");
         }
     }
 

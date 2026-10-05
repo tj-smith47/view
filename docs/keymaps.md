@@ -852,6 +852,11 @@ frames after the branch point stay in the recording and cannot be branched
 from. `b` is refused while view reads piped input. Keys you press while the
 fresh editor starts are typed after the replay.
 
+After `b`, the frame stays on screen while view checks the disk. Only `q`
+and `<Esc>` act then, and both return to the live screen with no confirm.
+The confirm then opens over the frame, and the bar drops its keys. `y`
+branches. `n` and `<Esc>` return to the live screen.
+
 `e` writes `view-dvr-<seconds>.vdvr` in the directory view was started in.
 `:View dvr export PATH` writes to PATH, read as `:w` reads a file name: `~`
 is your home directory and a relative path starts from the current

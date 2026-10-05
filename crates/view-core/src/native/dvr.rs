@@ -346,11 +346,13 @@ impl Dvr {
         }
     }
 
-    /// Returns to the live screen, closing any clip. Returns whether a
-    /// scrub was open.
+    /// Returns to the live screen, closing any clip and ending a branch
+    /// ask still waiting on its disk check. Returns whether a scrub was
+    /// open.
     pub(crate) fn close_scrub(&mut self) -> bool {
         self.pending_moves.clear();
         self.clip = None;
+        self.cancel_ask();
         self.scrub.take().is_some()
     }
 
@@ -452,6 +454,11 @@ impl Dvr {
     /// The frame a branch was asked from, once, when its disk check answers.
     pub(crate) fn take_asked(&mut self) -> Option<u64> {
         self.asked.take()
+    }
+
+    /// Ends a branch ask, so its disk check raises no confirm.
+    pub(crate) fn cancel_ask(&mut self) {
+        self.asked = None;
     }
 
     /// Whether a branch waits on its disk check.

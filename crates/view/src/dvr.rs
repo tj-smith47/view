@@ -418,7 +418,8 @@ impl Painted {
 /// carry the live screen, so a question that opened under the scrub reads
 /// keys once a live frame showing it is painted, and `recorded` sees the
 /// model read-only. The branch confirm is painted over the recorded frame,
-/// and reads keys once that frame is written.
+/// and reads keys once that frame is written, or once a pass finds the
+/// frame gone from the ring.
 pub(crate) fn paint_pass<T>(
     model: &mut Model,
     dvr: Option<&mut DvrLoop>,
@@ -431,9 +432,9 @@ pub(crate) fn paint_pass<T>(
             Some(None) => return Ok(Painted::Recorded(false)),
             Some(Some((seq, bar))) => {
                 let wrote = recorded(target, model, &dvr.ring, seq, &bar)?;
-                if wrote {
-                    model.note_recorded_frame_painted();
-                }
+                // a frame the ring no longer keeps paints nothing, and a
+                // confirm left unshown would read no key, `<Esc>` included
+                model.note_recorded_frame_painted();
                 return Ok(Painted::Recorded(wrote));
             }
             None => {}
@@ -658,6 +659,31 @@ mod tests {
         let _ = update(&mut model, key("y"));
         assert!(model.dvr.is_branching());
         assert!(model.dvr.scrub_frame().is_none());
+    }
+
+    #[test]
+    fn a_branch_confirm_over_a_frame_no_longer_kept_still_answers_esc() {
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        open_scrub(&mut model, &mut dvr);
+        let _ = press(&mut model, &mut dvr, "b");
+        let checked = DvrIoReply::DiskChecked {
+            changed: Vec::new(),
+            unverifiable: false,
+        };
+        let _ = update(&mut model, Msg::DvrIo(checked));
+        let pass = paint_pass(
+            &mut model,
+            Some(&mut dvr),
+            &mut (),
+            |(), _| Ok(true),
+            |(), _, _, _, _| Ok(false),
+        )
+        .unwrap();
+        assert_eq!(pass, Painted::Recorded(false));
+        let _ = update(&mut model, key("<Esc>"));
+        assert!(!model.branch_confirm_focused(), "<Esc> answers the confirm");
+        assert!(model.dvr.scrub_frame().is_none(), "and returns to live");
     }
 
     #[test]
