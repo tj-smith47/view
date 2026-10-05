@@ -10,9 +10,11 @@ use crate::model::Model;
 use crate::native::speculate::is_cmdline_mode;
 
 /// Whether `events` report an error for the submitted line and then leave
-/// the command line: a `msg_show` of kind `emsg`, or a line nvim draws
-/// into its own message area whose first cell, and its row's column 0,
-/// are drawn as an error. nvim reads a line typed ahead as soon as the
+/// the command line: a `msg_show` of kind `emsg` or one drawn in
+/// `ErrorMsg`, or a line nvim draws into its own message area whose first
+/// cell, and its row's column 0, are drawn as an error. A view command
+/// that refuses to run sends no invocation and echoes why in `ErrorMsg`,
+/// so its line ends here. nvim reads a line typed ahead as soon as the
 /// one before it ends, so a mode change into the command line after an
 /// error says that error was the earlier line's. nvim reports modes in
 /// every attach.
@@ -24,8 +26,8 @@ use crate::native::speculate::is_cmdline_mode;
 /// an invocation before it has applied that invocation.
 ///
 /// Costs one pass over the batch, one more for its highlight definitions
-/// at the first line drawn into the message area, and a look back for
-/// column 0 on an error line that starts past it.
+/// at the first message or line drawn into the message area, and a look
+/// back for column 0 on an error line that starts past it.
 pub(super) fn reports_error(model: &Model, events: &[UiEvent]) -> bool {
     let grids = model.engine.grids();
     let mut error = None;
@@ -35,6 +37,13 @@ pub(super) fn reports_error(model: &Model, events: &[UiEvent]) -> bool {
             UiEvent::ModeChange { mode, .. } if is_cmdline_mode(mode) => reported = false,
             UiEvent::ModeChange { .. } if reported => return true,
             UiEvent::MsgShow { kind, .. } if kind == "emsg" => reported = true,
+            UiEvent::MsgShow { content, .. } => {
+                let Some((attr, _)) = content.first() else {
+                    continue;
+                };
+                let error = error.get_or_insert_with(|| error_attr(model, events));
+                reported |= error.as_ref().is_some_and(|error| error.draws(*attr));
+            }
             UiEvent::GridLine {
                 grid,
                 row,

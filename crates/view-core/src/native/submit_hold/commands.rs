@@ -2,22 +2,22 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Whether one of the `|`-separated commands on `line` is `View` or an
-/// abbreviation nvim would run as it. A command that reads the `|` as its
-/// argument ends the reading.
-pub(super) fn names_view(line: &str) -> bool {
+/// How many of the `|`-separated commands on `line` are `View` or an
+/// abbreviation nvim would run as it. `View` ends at a `|`, and any other
+/// command that reads the `|` as its argument ends the reading.
+pub(super) fn view_commands(line: &str) -> usize {
     let mut rest = line;
+    let mut count = 0;
     loop {
         let command = skip_modifiers(rest);
         let word = command_word(command);
-        if word.starts_with('V') && "View".starts_with(word) {
-            return true;
-        }
-        if takes_bar(command) {
-            return false;
+        let view = word.starts_with('V') && "View".starts_with(word);
+        count += usize::from(view);
+        if !view && takes_bar(command) {
+            return count;
         }
         let Some(bar) = unescaped(command, '|') else {
-            return false;
+            return count;
         };
         rest = &command[bar + 1..];
     }
@@ -359,10 +359,10 @@ mod tests {
     #[test]
     fn the_command_word_is_read_with_its_abbreviations() {
         for line in ["View ai open", "Vie ai", "  :View", "View!", "V"] {
-            assert!(names_view(line), "{line:?}");
+            assert!(view_commands(line) > 0, "{line:?}");
         }
         for line in ["", "vim", "Vex", "Views", "set ft=View", "edit View"] {
-            assert!(!names_view(line), "{line:?}");
+            assert_eq!(view_commands(line), 0, "{line:?}");
         }
     }
 
@@ -379,7 +379,7 @@ mod tests {
             "set ft=x\\|y|View",
             "hide|View",
         ] {
-            assert!(names_view(line), "{line:?}");
+            assert!(view_commands(line) > 0, "{line:?}");
         }
         for line in [
             "normal! ihello|View",
@@ -406,7 +406,7 @@ mod tests {
             "/a\\/b/normal x|View",
             "/[/]/normal x|View",
         ] {
-            assert!(!names_view(line), "{line:?}");
+            assert_eq!(view_commands(line), 0, "{line:?}");
         }
     }
 
@@ -452,7 +452,7 @@ mod tests {
             "bel View",
             "hor View",
         ] {
-            assert!(names_view(line), "{line:?}");
+            assert!(view_commands(line) > 0, "{line:?}");
         }
         for line in [
             "silent echo 1",
@@ -472,7 +472,7 @@ mod tests {
             "filter «x y« View",
             "filter \u{2014}x y\u{2014} View",
         ] {
-            assert!(!names_view(line), "{line:?}");
+            assert_eq!(view_commands(line), 0, "{line:?}");
         }
     }
 }

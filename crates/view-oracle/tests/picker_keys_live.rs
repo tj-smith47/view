@@ -320,18 +320,10 @@ fn typed_ahead_from_the_picker(session: &mut PtySession, open: &[u8]) {
     );
 }
 
-/// Opens the files picker with `open`, types a query only [`NEW`] matches,
-/// and waits for the picker to list it alone.
+/// Opens the files picker with `open` and, in the same write, types a
+/// query only [`NEW`] matches, and waits for the picker to list it alone.
 fn query_new(session: &mut PtySession, open: &[u8]) {
-    session.send(open).unwrap();
-    // keys typed behind a command line that runs two `:View` commands go
-    // out once the first has run, ahead of the picker the second opens
-    assert!(
-        session.wait_for("╭ Files", budget()),
-        "the picker never opened; screen:\n{}",
-        session.screen()
-    );
-    session.send(b"pknew").unwrap();
+    session.send(&[open, b"pknew"].concat()).unwrap();
     // the unfiltered list goes once the query's answer replaces it, and a
     // name outside the picker's frame (a sidebar, the status line) has no
     // border to its left

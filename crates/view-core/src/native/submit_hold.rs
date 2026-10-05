@@ -38,7 +38,7 @@ use std::time::Duration;
 pub(crate) use typed_ahead::owed_after;
 pub(crate) use user_run::canonical_typed;
 
-use commands::names_view;
+use commands::view_commands;
 
 use crate::events::UiEvent;
 use crate::model::{CmdlineState, Focus, Model};
@@ -79,8 +79,9 @@ pub const OWES_AFTER: [(&str, &str, &str); 6] = [
 /// What armed a standing hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Armed {
-    /// A submitted `:View` command line.
-    Command,
+    /// A submitted `:View` command line, `owed` the invocations its view
+    /// commands have yet to send.
+    Command { owed: usize },
     /// A key sequence nvim maps to a view invocation.
     Sequence,
     /// An open the picker or the tree asked nvim for. A key typed behind
@@ -702,9 +703,9 @@ impl SubmitHold {
     }
 
     /// Ends the tracked line when the key just typed into it completed a
-    /// mapping or an abbreviation whose rhs submits it, and says whether
-    /// that line runs `:View`.
-    fn submit_by_mapping(&mut self) -> Option<bool> {
+    /// mapping or an abbreviation whose rhs submits it, and says how many
+    /// view commands that line runs.
+    fn submit_by_mapping(&mut self) -> Option<usize> {
         let Some(Typed::Known(text)) = &self.typed else {
             return None;
         };
@@ -720,7 +721,7 @@ impl SubmitHold {
             return None;
         }
         self.end_line(None);
-        Some(names_view(&line.text))
+        Some(view_commands(&line.text))
     }
 
     /// Notes that nvim reported `mode`, which answers every key that left
@@ -901,10 +902,12 @@ impl SubmitHold {
         }
     }
 
-    /// Whether `msg` ends a standing hold: the command's own notification,
-    /// the bound this hold armed, or, for a hold a key sequence armed, a
-    /// batch arriving once the hold is settled while nvim is out of normal
-    /// mode, by the batch's own report or else by `mode`, the last one.
+    /// Whether `msg` ends a standing hold: the notification of the last
+    /// view command a line runs (counted down as each arrives), a key
+    /// sequence's own notification, the bound this hold armed, or, for a
+    /// hold a key sequence armed, a batch arriving once the hold is settled
+    /// while nvim is out of normal mode, by the batch's own report or else
+    /// by `mode`, the last one.
     /// That says the sequence ran no mapping. A report before then may
     /// answer a key sent ahead of the sequence. A hold an open armed ends
     /// on its bound here, and otherwise as [`released_by_open`] states.
@@ -913,7 +916,11 @@ impl SubmitHold {
             return false;
         };
         match msg {
-            Msg::FeatureInvoke { .. } => !matches!(armed, Armed::Open { .. }),
+            Msg::FeatureInvoke { .. } => match armed {
+                Armed::Command { owed } => *owed == 0,
+                Armed::Sequence => true,
+                Armed::Open { .. } => false,
+            },
             Msg::SubmitHoldExpired { generation } => *generation == self.generation,
             Msg::Redraw(events) => {
                 let mut reported = events
@@ -963,12 +970,17 @@ impl SubmitHold {
     }
 
     /// Keeps `msg` when a hold stands and it is input, handing it back
-    /// otherwise.
+    /// otherwise. An invocation behind a command line counts against the
+    /// invocations that line owes.
     pub fn hold(&mut self, msg: Msg) -> Option<Msg> {
         match (&mut self.held, &msg) {
             (Some((_, held)), Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_)) => {
                 held.push(msg);
                 None
+            }
+            (Some((Armed::Command { owed }, _)), Msg::FeatureInvoke { .. }) => {
+                *owed = owed.saturating_sub(1);
+                Some(msg)
             }
             _ => Some(msg),
         }
@@ -1275,15 +1287,16 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
         let opened = hold.line_opened();
         let states = std::mem::take(&mut hold.states);
         let typed = hold.end_line(None);
-        if submits_view(model, opened, typed.as_ref(), &states) {
-            return arm(model, Armed::Command);
+        let owed = submits_view(model, opened, typed.as_ref(), &states);
+        if owed > 0 {
+            return arm(model, Armed::Command { owed });
         }
     } else if typed.edit(notation) {
         hold.end_line(None);
     } else {
         hold.note_edited();
-        if hold.submit_by_mapping() == Some(true) {
-            return arm(model, Armed::Command);
+        if let Some(owed @ 1..) = hold.submit_by_mapping() {
+            return arm(model, Armed::Command { owed });
         }
     }
     Vec::new()
@@ -1346,17 +1359,17 @@ pub(crate) fn may_open(model: &Model) -> bool {
                 .contains(&model.engine.mode.current.as_str()))
 }
 
-/// Whether the line a `<CR>` submits runs `:View`, read from the engine's
-/// last `cmdline_show` of it, and from the keys view sent where the engine
-/// has shown none or is showing a text those keys gave the line on the way
-/// (`states`), since the keys after it are still in flight.
+/// How many view commands the line a `<CR>` submits runs, read from the
+/// engine's last `cmdline_show` of it, and from the keys view sent where
+/// the engine has shown none or is showing a text those keys gave the line
+/// on the way (`states`), since the keys after it are still in flight.
 ///
 /// A `cnoremap` or a `cabbrev` can put `View` on a line whose keys never
 /// spelled it. The engine's line shows a mapping's text once nvim has read
 /// its keys, and the user's command-line mappings and abbreviations expand
 /// the keys it has not read yet. An abbreviation that ends the line is
 /// expanded by the `<CR>` itself, after nvim's last show of the line.
-fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[State]) -> bool {
+fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[State]) -> usize {
     let hold = &model.submit_hold;
     let shown = model
         .engine
@@ -1370,7 +1383,7 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
                 .collect::<String>()
         });
     let shown_view = |shown: &str| {
-        names_view(
+        view_commands(
             &hold
                 .expand_abbreviation(Line::typed(shown), WordEnd::Submit)
                 .text,
@@ -1380,8 +1393,8 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
         (Some(Typed::Known(_)), Some(shown)) if opened && !in_flight(states, &shown) => {
             shown_view(&shown)
         }
-        (Some(Typed::Known(text)), _) => names_view(&hold.expand_typed(text, true).text),
-        (_, shown) => shown.is_some_and(|shown| shown_view(&shown)),
+        (Some(Typed::Known(text)), _) => view_commands(&hold.expand_typed(text, true).text),
+        (_, shown) => shown.map_or(0, |shown| shown_view(&shown)),
     }
 }
 
@@ -1400,7 +1413,7 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
 pub fn releases(model: &Model, msg: &Msg) -> bool {
     let hold = &model.submit_hold;
     hold.ended_by(msg, &model.engine.mode.current)
-        || matches!(hold.held, Some((Armed::Command, _)))
+        || matches!(hold.held, Some((Armed::Command { .. }, _)))
             && matches!(msg, Msg::Redraw(events) if refused::reports_error(model, events))
 }
 
@@ -1453,7 +1466,7 @@ pub(crate) fn hold_for_open(model: &mut Model) -> (u64, Vec<Effect>) {
 /// never reports back releases the keys to wherever focus stands.
 fn arm(model: &mut Model, armed: Armed) -> Vec<Effect> {
     let hold = &mut model.submit_hold;
-    if armed == Armed::Command {
+    if matches!(armed, Armed::Command { .. }) {
         // a line typed by hand runs the next invocation, whatever key last
         // completed one nvim never ran
         let _ = hold.log.take_invoked();
@@ -2619,6 +2632,77 @@ mod tests {
             feature: "picker".to_string(),
             verb: "files".to_string(),
         }
+    }
+
+    /// Submits `:line` typed key by key and types an `x` behind it, which
+    /// the hold the line arms keeps.
+    fn submit(model: &mut Model, line: &str) {
+        let mut keys = vec![":".to_string()];
+        keys.extend(line.chars().map(String::from));
+        keys.extend(["<CR>".to_string(), "x".to_string()]);
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let sent = type_keys(model, &keys);
+        assert!(model.submit_hold.is_holding(), "{line}: {sent:?}");
+    }
+
+    /// How many invocations `model`'s hold stands through before it ends,
+    /// `None` when it outlasts `invocations`. Each is an invocation of a
+    /// feature no build has, so it opens nothing that would take the keys.
+    fn invocations_to_release(model: &mut Model, invocations: usize) -> Option<usize> {
+        (1..=invocations).find(|_| {
+            let _ = crate::update::update(
+                model,
+                Msg::FeatureInvoke {
+                    generation: None,
+                    feature: "none".to_string(),
+                    verb: "none".to_string(),
+                },
+            );
+            !model.submit_hold.is_holding()
+        })
+    }
+
+    /// Keys typed behind a line of chained view commands wait for the last
+    /// command's invocation, and a part that is no view command is owed
+    /// none.
+    #[test]
+    fn keys_behind_chained_view_commands_wait_for_the_last_one() {
+        for (line, owed) in [
+            ("View ai open", 1),
+            ("View ai open | View picker files", 2),
+            ("View ai open | View tree | View picker files", 3),
+            ("set nu | View picker files", 1),
+            ("View picker files | set nu", 1),
+            ("View ai open | normal :View tree", 1),
+        ] {
+            let mut model = normal_mode();
+            submit(&mut model, line);
+            assert_eq!(invocations_to_release(&mut model, 4), Some(owed), "{line}");
+        }
+    }
+
+    /// A view command that refuses to run invokes nothing and says why in
+    /// `ErrorMsg`, as an `echomsg` where nvim's messages are attached. The
+    /// keys behind the line go once nvim has drawn that and left the
+    /// command line, after the invocations the line's other commands made.
+    #[test]
+    fn keys_behind_a_view_command_that_refuses_go_on_its_message() {
+        use crate::native::ext::Ext;
+        let mut model = normal_mode();
+        model.attach_surfaces(vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages]);
+        let _ = crate::update::update(&mut model, error_highlights(None));
+        submit(&mut model, "View dvr export $NOPE/x | View picker files");
+        assert_eq!(invocations_to_release(&mut model, 1), None);
+        let sent = crate::update::update(
+            &mut model,
+            Msg::Redraw(vec![
+                UiEvent::CmdlineHide { level: 1 },
+                message("echomsg", "view: DVR cannot export: $NOPE is not set"),
+                mode("normal"),
+            ]),
+        );
+        assert!(!model.submit_hold.is_holding(), "{sent:?}");
+        assert_eq!(inputs(&sent), ["x"]);
     }
 
     /// A default key with the leader resolved holds what is typed behind
