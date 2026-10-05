@@ -867,13 +867,14 @@ fn note_unread_config(
 /// cannot: `[ai]`'s two keys are resolved by the crate that parses that
 /// table, and a triage mode that suppressed the file and the environment
 /// for eleven keys and let `VIEW_AI_AGENT` through would be answering a
-/// different question for the twelfth.
+/// different question for the twelfth. `env` reads the environment layer.
 fn seed_ai_enabled(
     config_path: Option<&std::path::Path>,
     clean: bool,
+    env: &dyn Fn(&str) -> Option<String>,
     model: &mut Model,
 ) -> (Vec<Effect>, view_ai::AgentSpec) {
-    match view_ai::AiConfig::resolve(config_path, clean) {
+    match view_ai::AiConfig::resolve_with(config_path, clean, env) {
         Ok(cfg) => {
             model.ai_enabled = cfg.enabled();
             model.ai_panel_width_pct = cfg.panel_width();
@@ -1423,8 +1424,12 @@ fn main() -> Result<()> {
     // choice, so cold start can already paint last session's colors --
     // last session under *this* colorscheme's -- before nvim answers
     // `ui_attach` with its own `default_colors_set`
-    let (ai_seed_effects, ai_agent) =
-        seed_ai_enabled(config_path.as_deref(), cli.clean, &mut model);
+    let (ai_seed_effects, ai_agent) = seed_ai_enabled(
+        config_path.as_deref(),
+        cli.clean,
+        &|name| std::env::var(name).ok(),
+        &mut model,
+    );
     pre_executor_effects.extend(ai_seed_effects);
 
     // seeded before the cache read below, which is keyed on it, and read
@@ -3749,13 +3754,19 @@ mod tests {
         );
     }
 
+    /// An environment holding no variable, so a seeded value is the
+    /// config file's alone whatever the test run's environment holds.
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
     #[test]
     fn a_broken_ai_config_seeds_disabled_and_names_the_file() {
         let dir = view_test_support::ScratchDir::new("seed-ai-enabled-broken").unwrap();
         let path = dir.join("view.toml");
         std::fs::write(&path, "[ai]\nenabled = \"not a bool\"\n").unwrap();
         let mut model = Model::with_term_size(80, 24);
-        let (effects, _agent) = seed_ai_enabled(Some(&path), false, &mut model);
+        let (effects, _agent) = seed_ai_enabled(Some(&path), false, &no_env, &mut model);
         assert!(
             !model.ai_enabled,
             "an unreadable/invalid [ai] table must fail closed, not silently widen the surface"
@@ -3788,7 +3799,7 @@ mod tests {
         let path = dir.join("view.toml");
         std::fs::write(&path, "[ai]\npanel_width = 45\n").unwrap();
         let mut model = Model::with_term_size(80, 24);
-        let (_effects, _agent) = seed_ai_enabled(Some(&path), false, &mut model);
+        let (_effects, _agent) = seed_ai_enabled(Some(&path), false, &no_env, &mut model);
         assert_eq!(
             model.ai_panel_width_pct, 45,
             "the overlay draw's own number"
@@ -3808,7 +3819,7 @@ mod tests {
         let path = dir.join("view.toml");
         std::fs::write(&path, "[ui.surfaces.agent]\nsize = 55\n").unwrap();
         let mut model = Model::with_term_size(80, 24);
-        let (_effects, _agent) = seed_ai_enabled(Some(&path), false, &mut model);
+        let (_effects, _agent) = seed_ai_enabled(Some(&path), false, &no_env, &mut model);
         assert_eq!(model.ai_panel_width_pct, 55);
         assert_eq!(model.surfaces.layout(NativeSurface::Agent).size, 55);
     }
@@ -3819,7 +3830,7 @@ mod tests {
         let path = dir.join("view.toml");
         std::fs::write(&path, "[ai]\nenabled = false\n").unwrap();
         let mut model = Model::with_term_size(80, 24);
-        let (effects, _agent) = seed_ai_enabled(Some(&path), false, &mut model);
+        let (effects, _agent) = seed_ai_enabled(Some(&path), false, &no_env, &mut model);
         assert!(
             !model.ai_enabled,
             "a valid [ai] enabled = false must seed the configured value, not the default"
@@ -3830,7 +3841,7 @@ mod tests {
         );
 
         let mut absent = Model::with_term_size(80, 24);
-        let (effects, agent) = seed_ai_enabled(None, false, &mut absent);
+        let (effects, agent) = seed_ai_enabled(None, false, &no_env, &mut absent);
         assert!(
             absent.ai_enabled,
             "no config path at all is the documented default-on case"
@@ -3853,7 +3864,7 @@ mod tests {
         let path = dir.join("view.toml");
         std::fs::write(&path, "[ai]\nagent = [\"my-agent\", \"--flag\"]\n").unwrap();
         let mut model = Model::with_term_size(80, 24);
-        let (effects, agent) = seed_ai_enabled(Some(&path), false, &mut model);
+        let (effects, agent) = seed_ai_enabled(Some(&path), false, &no_env, &mut model);
         assert!(effects.is_empty(), "{effects:?}");
         assert!(model.ai_enabled);
         assert_eq!(

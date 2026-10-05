@@ -293,14 +293,21 @@ mod tests {
     /// path under the DVR's name.
     #[test]
     fn a_dvr_cell_hands_the_view_side_a_config_that_records() {
-        let fixtures: Vec<&str> = MATRIX
+        let rows: Vec<(&str, &str)> = MATRIX
             .iter()
             .chain(DIAGNOSTIC_MATRIX)
             .filter(|(scenario, _)| scenario.starts_with("dvr_"))
-            .map(|(_, fixture)| *fixture)
+            .copied()
             .collect();
-        assert_eq!(fixtures.len(), 2, "the two DVR rows are in the matrix");
-        for fixture in fixtures {
+        let mut scenarios: Vec<&str> = rows.iter().map(|(scenario, _)| *scenario).collect();
+        scenarios.sort_unstable();
+        assert_eq!(
+            scenarios,
+            ["dvr_input", "dvr_scroll"],
+            "the matrix holds one row each of dvr_input and dvr_scroll; \
+             these are its DVR rows: {rows:?}"
+        );
+        for (_, fixture) in rows {
             let mut world = CellWorld::create(fixture).unwrap();
             world.enable_dvr();
             let side = world.side(fixture, "view").unwrap();
