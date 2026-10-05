@@ -3648,7 +3648,7 @@ impl EngineHandle {
     /// `generation`, resolving `Source::Buffers`'s corpus. Async by
     /// construction, like [`probe_default_hl`](Self::probe_default_hl): this
     /// issues the request through [`EngineHandle::request_buffer_list`] and
-    /// returns immediately; the list crosses back as `Msg::PickerBufferList`
+    /// returns immediately; the list crosses back as `Msg::PickerBuffers`
     /// through the connection's pump. See
     /// `docs/picker-buffer-list-wire-capture.md` for the reply shapes
     /// `crate::handle`'s `decode_buffer_list_reply` decodes.

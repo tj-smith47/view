@@ -41,7 +41,7 @@ A buflisted-filtered scan (the same filter `BUFFER_LIST_CHUNK` uses for the
 picker's `Source::Buffers`) over `nvim_list_bufs()` right after creating and
 naming the buffer never includes it; only nvim's own default buffer (`1`) shows
 up. Confirms the falsifiable check: a hidden buffer never reaches
-`Msg::PickerBufferList`.
+`Msg::PickerBuffers`.
 
 ## 2. `nvim_buf_set_lines` marks the buffer modified; `bufload` does not
 

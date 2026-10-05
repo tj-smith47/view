@@ -272,7 +272,7 @@ fn assert_no_interference_with(
         // list is a request nvim refused
         let names = driver
             .wait_for(|msg| match msg {
-                Msg::PickerBufferList { names, .. } => Some(names.clone()),
+                Msg::PickerBuffers { buffers, .. } => Some(buffers.clone()),
                 _ => None,
             })
             .expect("the picker's buffer list was never answered");

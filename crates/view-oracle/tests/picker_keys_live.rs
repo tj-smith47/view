@@ -131,6 +131,68 @@ fn down_then_enter_opens_the_second_result() {
     );
 }
 
+/// The buffer the `tabs`th tab shows once a `<C-t>` open has made it.
+/// nvim can take keys typed behind the open ahead of the open itself, so
+/// the question is asked again until the new tab answers it.
+fn buffer_in_new_tab(session: &mut PtySession, tabs: u64) -> Option<u64> {
+    assert!(
+        session.wait_for_screen(budget(), |screen| !screen.contents().contains('╭')),
+        "the picker never closed; screen:\n{}",
+        session.screen()
+    );
+    let want = format!("pk={tabs}/");
+    let deadline = std::time::Instant::now() + budget();
+    while std::time::Instant::now() < deadline {
+        session
+            .send(b":echo 'pk=' . tabpagenr('$') . '/' . bufnr('%') . '.'\r")
+            .unwrap();
+        let ask = view_test_support::host_deadline(Duration::from_secs(2));
+        if session.wait_for(&want, ask) {
+            let screen = session.screen();
+            let at = screen.find(&want)? + want.len();
+            return screen[at..].split('.').next()?.parse().ok();
+        }
+    }
+    None
+}
+
+#[test]
+fn each_of_two_unnamed_buffers_opens_the_one_chosen() {
+    let (_paths, _tree, mut session) = spawn_in("picker-keys-buffers", &[]);
+    session.send(b":call setline(1, 'pkone')\r").unwrap();
+    session.send(b":enew\r").unwrap();
+    session.send(b":call setline(1, 'pktwo')\r").unwrap();
+    assert!(
+        session.wait_for("pktwo", budget()),
+        "the second unnamed buffer never showed; screen:\n{}",
+        session.screen()
+    );
+    let mut opened = Vec::new();
+    for (downs, tabs) in [(0, 2), (1, 3)] {
+        let before = session.screen().matches("[No Name]").count();
+        session.send(b"\x1b:View picker buffers\r").unwrap();
+        assert!(
+            session.wait_for_screen(budget(), |screen| {
+                screen.contents().matches("[No Name]").count() >= before + 2
+            }),
+            "the picker never listed both unnamed buffers; screen:\n{}",
+            session.screen()
+        );
+        for _ in 0..downs {
+            session.send(b"\x1b[B").unwrap();
+        }
+        session.send(b"\x14").unwrap();
+        let buffer = buffer_in_new_tab(&mut session, tabs);
+        assert!(
+            buffer.is_some(),
+            "row {downs} never opened in a new tab; screen:\n{}",
+            session.screen()
+        );
+        opened.extend(buffer);
+    }
+    assert_ne!(opened[0], opened[1], "both rows opened one buffer");
+}
+
 #[test]
 fn enter_on_a_grep_match_lands_on_its_line() {
     let (_paths, _tree, mut session) = spawn_in(

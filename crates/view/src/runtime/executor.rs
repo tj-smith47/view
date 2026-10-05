@@ -426,10 +426,7 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::SelectTab { tab } => self.ops.select_tab(tab),
                     RpcCall::SelectBuffer { buf } => self.ops.select_buffer(buf),
                     RpcCall::OpenFile { path } => self.ops.open_file(&path),
-                    RpcCall::OpenPicked { target, how } => {
-                        self.ops
-                            .open_picked(&target.name, target.line, target.buffer, how)
-                    }
+                    RpcCall::OpenPicked { target, how } => self.ops.open_picked(&target, how),
                     RpcCall::RenameFile {
                         old_path,
                         new_path,

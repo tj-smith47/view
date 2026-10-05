@@ -692,22 +692,24 @@ pub(super) fn takeover_error_text(error: &Value) -> String {
     format!("view: the editor takeover did not run: {said}")
 }
 
-/// Decodes a buffer-list reply into each listed buffer's `name`, dropping
-/// `bufnr`/`modified` (the picker's `Source::Buffers` corpus is a plain path
-/// list; nothing here orders or annotates by either field -- see
-/// `docs/picker-buffer-list-wire-capture.md`). A row missing `name` is
-/// dropped: an unnamed scratch buffer still round-trips, since nvim replies
-/// `name = ""` for one rather than omitting the key (capture #1), so a
-/// missing key here can only mean a row shape this crate has never actually
-/// seen from the pinned engine.
-pub(super) fn decode_buffer_list_reply(result: &Value) -> Vec<String> {
+/// Decodes a buffer-list reply into each listed buffer's `bufnr` and
+/// `name`, dropping `modified` (see
+/// `docs/picker-buffer-list-wire-capture.md`). The handle is what a picker
+/// key opens the buffer by. A row missing either key is dropped: an
+/// unnamed scratch buffer still round-trips, since nvim replies `name = ""`
+/// for one rather than omitting the key (capture #1), so a missing key here
+/// can only mean a row shape this crate has never actually seen from the
+/// pinned engine.
+pub(super) fn decode_buffer_list_reply(result: &Value) -> Vec<(u64, String)> {
     let Some(rows) = result.as_array() else {
         return Vec::new();
     };
     rows.iter()
         .filter_map(|row| {
             let pairs = row.as_map()?;
-            Some(crate::wire::map_find(pairs, "name")?.as_str()?.to_owned())
+            let handle = crate::wire::map_find(pairs, "bufnr")?.as_u64()?;
+            let name = crate::wire::map_find(pairs, "name")?.as_str()?;
+            Some((handle, name.to_owned()))
         })
         .collect()
 }

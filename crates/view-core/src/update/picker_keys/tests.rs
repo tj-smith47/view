@@ -160,9 +160,11 @@ fn each_open_key_opens_the_selected_file_in_its_window_and_closes_the_picker() {
         let _ = press(&mut m, "<Down>");
         let (target, how) = opened(&press(&mut m, key));
         assert_eq!(how, want, "{key}");
-        assert!(target.name.ends_with("b.rs"), "{key}: {target:?}");
-        assert_eq!(target.line, None);
-        assert!(!target.buffer);
+        let Picked::File { path, line } = target else {
+            panic!("{key}: {target:?}");
+        };
+        assert!(path.ends_with("b.rs"), "{key}: {path}");
+        assert_eq!(line, None);
         assert!(!picker_open(&m), "{key} closes the picker");
         assert!(m.dirty, "{key} repaints");
     }
@@ -186,45 +188,65 @@ fn a_grep_match_opens_its_file_at_its_line() {
         let _ = press(&mut m, "<C-j>");
         let (target, how) = opened(&press(&mut m, key));
         assert_eq!(how, want, "{key}");
-        assert!(target.name.ends_with("src/b.rs"), "{key}: {target:?}");
-        assert_eq!(target.line, Some(42), "{key}");
-        assert!(!target.buffer);
+        let Picked::File { path, line } = target else {
+            panic!("{key}: {target:?}");
+        };
+        assert!(path.ends_with("src/b.rs"), "{key}: {path}");
+        assert_eq!(line, Some(42), "{key}");
     }
 }
 
+/// The buffers picker opened on nvim's list of `(handle, name)` pairs, its
+/// corpus handed back as the matcher's results unfiltered.
+fn buffers(listed: &[(u64, &str)]) -> Model {
+    let mut m = picker_with("buffers", Vec::new());
+    let generation = m.picker_mut().unwrap().generation();
+    let buffers = listed
+        .iter()
+        .map(|&(handle, name)| (handle, name.to_string()))
+        .collect();
+    let effects = update(
+        &mut m,
+        Msg::PickerBuffers {
+            generation,
+            buffers,
+        },
+    );
+    let items = match effects.as_slice() {
+        [Effect::PickerQuery {
+            resolved: Some(items),
+            ..
+        }] => items.clone(),
+        other => panic!("expected the corpus for the matcher, got {other:?}"),
+    };
+    let _ = update(&mut m, Msg::PickerResults { generation, items });
+    m
+}
+
 #[test]
-fn a_buffer_opens_by_its_name_and_an_unnamed_one_by_the_empty_name() {
+fn a_buffer_opens_by_its_handle_in_each_window() {
     for (key, want) in [
         ("<CR>", OpenIn::Current),
         ("<C-v>", OpenIn::Vertical),
         ("<C-x>", OpenIn::Horizontal),
         ("<C-t>", OpenIn::Tab),
     ] {
-        let mut m = picker_with(
-            "buffers",
-            vec![
-                PickerItem::new("/work/notes.md"),
-                PickerItem::new("[No Name]"),
-            ],
-        );
+        let mut m = buffers(&[(4, "/work/notes.md"), (9, "")]);
         let (target, how) = opened(&press(&mut m, key));
         assert_eq!(how, want, "{key}");
-        assert_eq!(target.name, "/work/notes.md", "{key}");
-        assert_eq!(target.line, None);
-        assert!(target.buffer, "{key}");
-
-        let mut m = picker_with(
-            "buffers",
-            vec![
-                PickerItem::new("/work/notes.md"),
-                PickerItem::new("[No Name]"),
-            ],
-        );
-        let _ = press(&mut m, "<Down>");
-        let (target, _) = opened(&press(&mut m, key));
-        assert_eq!(target.name, "", "{key}");
-        assert!(target.buffer, "{key}");
+        assert_eq!(target, Picked::Buffer { handle: 4 }, "{key}");
     }
+}
+
+/// Two unnamed buffers read alike in the list, and the second one chosen
+/// is the one that opens. Opened by name, either reached the first.
+#[test]
+fn the_second_of_two_unnamed_buffers_opens_that_buffer() {
+    let mut m = buffers(&[(3, ""), (5, "/work/notes.md"), (8, "")]);
+    let _ = press(&mut m, "<Down>");
+    let _ = press(&mut m, "<Down>");
+    let (target, _) = opened(&press(&mut m, "<CR>"));
+    assert_eq!(target, Picked::Buffer { handle: 8 });
 }
 
 #[test]

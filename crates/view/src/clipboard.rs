@@ -1037,9 +1037,7 @@ mod tests {
         }
         fn open_picked(
             &self,
-            _name: &str,
-            _line: Option<u64>,
-            _buffer: bool,
+            _target: &view_core::native::picker::Picked,
             _how: view_core::msg::OpenIn,
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())

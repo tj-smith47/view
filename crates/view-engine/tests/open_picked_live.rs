@@ -1,12 +1,12 @@
-//! Live-nvim check of `EngineHandle::open_picked`: each window a picker key
-//! names, a grep match's line, a listed buffer by its name, and an unnamed
-//! one.
+//! Live-nvim check of `EngineHandle::open_picked_target`: each window a
+//! picker key names, a grep match's line, and listed buffers by handle.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::mpsc;
 
 use rmpv::Value;
 use view_core::msg::OpenIn;
+use view_core::native::picker::Picked;
 use view_engine::process::{Engine, EngineConfig};
 
 fn scratch_root(suffix: &str) -> std::path::PathBuf {
@@ -73,10 +73,11 @@ fn a_file_opens_at_its_line_in_each_window_a_key_names() {
         (OpenIn::Tab, 1, 2),
     ] {
         let engine = spawn();
-        engine
-            .handle
-            .open_picked(&name, Some(3), false, how)
-            .unwrap();
+        let picked = Picked::File {
+            path: name.clone(),
+            line: Some(3),
+        };
+        engine.handle.open_picked_target(&picked, how).unwrap();
         let (current, line, wins, tabpages) = state(&engine);
         assert!(same_file(&current, &path), "{how:?}: {current}");
         assert_eq!(line, 3, "{how:?}");
@@ -91,16 +92,32 @@ fn a_line_past_the_end_lands_on_the_last_line() {
     let path = root.join("short.txt");
     std::fs::write(&path, "one\ntwo\n").unwrap();
     let engine = spawn();
+    let picked = Picked::File {
+        path: path.to_string_lossy().into_owned(),
+        line: Some(40),
+    };
     engine
         .handle
-        .open_picked(&path.to_string_lossy(), Some(40), false, OpenIn::Current)
+        .open_picked_target(&picked, OpenIn::Current)
         .unwrap();
     assert_eq!(state(&engine).1, 2);
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The current buffer's handle.
+fn current_buffer(engine: &Engine) -> u64 {
+    engine
+        .handle
+        .request("nvim_eval", vec![Value::from("bufnr('%')")])
+        .expect("read the current buffer")
+        .as_u64()
+        .unwrap()
+}
+
+/// A listed buffer opens by its handle, and of two unnamed buffers the one
+/// chosen opens. Opened by name, the first unnamed one opened for either.
 #[test]
-fn a_listed_buffer_and_an_unnamed_one_open_by_name() {
+fn a_listed_buffer_and_each_of_two_unnamed_ones_open_by_handle() {
     let root = scratch_root("buffers");
     let path = root.join("listed.txt");
     std::fs::write(&path, "listed\n").unwrap();
@@ -113,14 +130,30 @@ fn a_listed_buffer_and_an_unnamed_one_open_by_name() {
     ] {
         let engine = spawn();
         engine.handle.open_file(&name).unwrap();
+        let listed = current_buffer(&engine);
+        // an empty unnamed buffer is the one `:enew` reuses, so each holds
+        // a line before the next is made
         engine.handle.command("enew").unwrap();
-        engine.handle.open_picked(&name, None, true, how).unwrap();
-        let (current, _, wins, tabpages) = state(&engine);
-        assert!(same_file(&current, &path), "{how:?}: {current}");
+        engine.handle.command("call setline(1, 'one')").unwrap();
+        let first = current_buffer(&engine);
+        engine.handle.command("enew").unwrap();
+        engine.handle.command("call setline(1, 'two')").unwrap();
+        let second = current_buffer(&engine);
+        assert!(listed != first && first != second, "{how:?}");
+        engine.handle.open_file(&name).unwrap();
+
+        let picked = Picked::Buffer { handle: second };
+        engine.handle.open_picked_target(&picked, how).unwrap();
+        assert_eq!(current_buffer(&engine), second, "{how:?}: the second");
+        let (_, _, wins, tabpages) = state(&engine);
         assert_eq!((wins, tabpages), (windows, tabs), "{how:?}");
 
-        engine.handle.open_picked("", None, true, how).unwrap();
-        assert_eq!(state(&engine).0, "", "{how:?}: the unnamed buffer");
+        let picked = Picked::Buffer { handle: listed };
+        engine
+            .handle
+            .open_picked_target(&picked, OpenIn::Current)
+            .unwrap();
+        assert!(same_file(&state(&engine).0, &path), "{how:?}: the file");
     }
     let _ = std::fs::remove_dir_all(&root);
 }

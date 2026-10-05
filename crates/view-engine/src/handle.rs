@@ -142,7 +142,7 @@ enum Waiter {
     /// An async buffer-list enumeration for a picker's `Source::Buffers`
     /// (see [`EngineHandle::request_buffer_list`]): nothing is blocked on
     /// this `msgid`, so its `Response` is decoded and routed to `pump` as
-    /// `Msg::PickerBufferList`, tagged with `generation` so a reply a later
+    /// `Msg::PickerBuffers`, tagged with `generation` so a reply a later
     /// query has since superseded can be dropped by `update()` instead of
     /// clobbering it.
     BufferList { generation: u64 },
@@ -826,14 +826,14 @@ impl EngineHandle {
                                     // decode_mapping_report already follow
                                     // -- see
                                     // docs/picker-buffer-list-wire-capture.md
-                                    let names = if error == Value::Nil {
+                                    let buffers = if error == Value::Nil {
                                         decode_buffer_list_reply(&result)
                                     } else {
                                         Vec::new()
                                     };
-                                    pump.route_buffer_list(Msg::PickerBufferList {
+                                    pump.route_buffer_list(Msg::PickerBuffers {
                                         generation,
-                                        names,
+                                        buffers,
                                     });
                                 }
                             }
@@ -1773,7 +1773,7 @@ impl EngineHandle {
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
     /// into the picker's buffer-list corpus and routed to the connection's
-    /// pump as `Msg::PickerBufferList` (see [`Waiter::BufferList`]). Async
+    /// pump as `Msg::PickerBuffers` (see [`Waiter::BufferList`]). Async
     /// on the same terms as [`request_probe`](Self::request_probe):
     /// `Source::Buffers`'s picker query is issued from the runtime loop,
     /// which must never block on a reply.
@@ -3038,11 +3038,15 @@ mod tests {
         let msg = rx
             .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
             .unwrap();
-        let Msg::PickerBufferList { generation, names } = msg else {
-            unreachable!("expected PickerBufferList, got {msg:?}");
+        let Msg::PickerBuffers {
+            generation,
+            buffers,
+        } = msg
+        else {
+            unreachable!("expected PickerBuffers, got {msg:?}");
         };
         assert_eq!(generation, 4711);
-        assert!(names.is_empty(), "a failed request listed {names:?}");
+        assert!(buffers.is_empty(), "a failed request listed {buffers:?}");
         let logged = DIAGNOSED
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

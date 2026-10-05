@@ -80,20 +80,22 @@ fn next_hidden_buffer_loaded(rx: &mpsc::Receiver<Msg>) -> (u64, Option<u64>, boo
     }
 }
 
-/// Waits up to 5s for the next `Msg::PickerBufferList`, skipping the redraw
-/// traffic the UI attach produces.
+/// Waits up to 5s for the next `Msg::PickerBuffers`, skipping the redraw
+/// traffic the UI attach produces, and gives the buffers' names.
 fn next_picker_buffer_list(rx: &mpsc::Receiver<Msg>) -> Vec<String> {
     let deadline = Instant::now() + common::rpc_deadline();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
             remaining > Duration::ZERO,
-            "no Msg::PickerBufferList arrived within 5s"
+            "no Msg::PickerBuffers arrived within 5s"
         );
         match rx.recv_timeout(remaining) {
-            Ok(Msg::PickerBufferList { names, .. }) => return names,
+            Ok(Msg::PickerBuffers { buffers, .. }) => {
+                return buffers.into_iter().map(|(_, name)| name).collect()
+            }
             Ok(_other) => continue,
-            Err(err) => panic!("channel closed before a PickerBufferList arrived: {err}"),
+            Err(err) => panic!("channel closed before a PickerBuffers arrived: {err}"),
         }
     }
 }
@@ -521,7 +523,7 @@ fn a_modified_hidden_buffer_survives_release_hidden() {
     );
 }
 
-/// A hidden buffer never reaches `Msg::PickerBufferList`, the picker's own
+/// A hidden buffer never reaches `Msg::PickerBuffers`, the picker's own
 /// `Source::Buffers` enumeration -- a buffer created with `listed: true`
 /// would show up here, offering the user a buffer they never opened.
 #[test]

@@ -88,6 +88,8 @@ pub struct PickerItem {
     /// The 1-based line number `path` should open at, alongside `path`.
     /// `None` for a source with no line concept (`Files`, `Buffers`).
     pub line: Option<u64>,
+    /// The handle of the listed buffer a `Buffers` candidate stands for.
+    pub buffer: Option<u64>,
 }
 
 impl PickerItem {
@@ -120,10 +122,25 @@ impl PickerItem {
         let match_start = label.len() - text.len();
         Self {
             label,
-            indices: Vec::new(),
             match_start,
             path: Some(path),
             line: Some(line),
+            ..Self::default()
+        }
+    }
+
+    /// The listed buffer `handle`, labelled with `name` as nvim gives it,
+    /// or `[No Name]` for an unnamed one.
+    #[must_use]
+    pub fn listed_buffer(handle: u64, name: String) -> Self {
+        Self {
+            label: if name.is_empty() {
+                "[No Name]".to_string()
+            } else {
+                name
+            },
+            buffer: Some(handle),
+            ..Self::default()
         }
     }
 }
@@ -132,14 +149,19 @@ impl PickerItem {
 /// one of nvim's listed buffers.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Picked {
-    /// The file's path, or the buffer's name as `nvim_buf_get_name` gives
-    /// it (empty for an unnamed buffer).
-    pub name: String,
-    /// The 1-based line the cursor lands on.
-    pub line: Option<u64>,
-    /// Whether `name` names a listed buffer.
-    pub buffer: bool,
+pub enum Picked {
+    /// A file, opened by its path.
+    File {
+        /// The file's path.
+        path: String,
+        /// The 1-based line the cursor lands on.
+        line: Option<u64>,
+    },
+    /// A listed buffer, opened by its handle.
+    Buffer {
+        /// The buffer's handle.
+        handle: u64,
+    },
 }
 
 /// One open picker session: which corpus it searches, the query typed so
@@ -381,21 +403,17 @@ impl PickerState {
     }
 
     /// What opening the selected candidate reaches, or `None` with no
-    /// results. A `Buffers` candidate names its buffer by the name nvim
-    /// gave it, empty for an unnamed one.
+    /// results. A `Buffers` candidate names its buffer by handle, so two
+    /// whose names read alike stay apart.
     #[must_use]
     pub fn selected_target(&self) -> Option<Picked> {
         let item = self.items.get(self.selected)?;
-        let buffer = matches!(self.source, Source::Buffers);
-        let name = if buffer {
-            self.selected_path().unwrap_or_default()
-        } else {
-            self.selected_path()?
-        };
-        Some(Picked {
-            name,
+        if let Some(handle) = item.buffer {
+            return Some(Picked::Buffer { handle });
+        }
+        Some(Picked::File {
+            path: self.selected_path()?,
             line: item.line,
-            buffer,
         })
     }
 

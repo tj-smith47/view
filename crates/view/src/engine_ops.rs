@@ -118,7 +118,7 @@ pub trait EngineOps {
     fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError>;
     /// Enumerates listed, loaded buffers for `Source::Buffers`, tagged
     /// `generation`; never blocks, and never itself returns the list (see
-    /// `Msg::PickerBufferList`).
+    /// `Msg::PickerBuffers`).
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError>;
     /// Opens a window for `surface`, or enters the one it already has;
     /// never blocks, and never itself returns the handle (see
@@ -188,13 +188,12 @@ pub trait EngineOps {
     /// rather than duplicating it; fire-and-forget, no reply (see
     /// `RpcCall::OpenFile`).
     fn open_file(&self, path: &str) -> Result<(), EngineError>;
-    /// Opens a picker result in the window `how` names, the cursor on
-    /// `line`; fire-and-forget, no reply (see `RpcCall::OpenPicked`).
+    /// Opens a picker result in the window `how` names: a file by path, at
+    /// its line, or a buffer by handle; fire-and-forget, no reply (see
+    /// `RpcCall::OpenPicked`).
     fn open_picked(
         &self,
-        name: &str,
-        line: Option<u64>,
-        buffer: bool,
+        target: &view_core::native::picker::Picked,
         how: OpenIn,
     ) -> Result<(), EngineError>;
     /// Renames `old_path` to `new_path`, retargeting any open buffer along
@@ -495,12 +494,10 @@ impl EngineOps for EngineHandle {
     }
     fn open_picked(
         &self,
-        name: &str,
-        line: Option<u64>,
-        buffer: bool,
+        target: &view_core::native::picker::Picked,
         how: OpenIn,
     ) -> Result<(), EngineError> {
-        self.open_picked(name, line, buffer, how)
+        self.open_picked_target(target, how)
     }
     fn rename_file(
         &self,
@@ -755,12 +752,10 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn open_picked(
         &self,
-        name: &str,
-        line: Option<u64>,
-        buffer: bool,
+        target: &view_core::native::picker::Picked,
         how: OpenIn,
     ) -> Result<(), EngineError> {
-        (**self).open_picked(name, line, buffer, how)
+        (**self).open_picked(target, how)
     }
     fn rename_file(
         &self,
@@ -1018,12 +1013,10 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn open_picked(
         &self,
-        name: &str,
-        line: Option<u64>,
-        buffer: bool,
+        target: &view_core::native::picker::Picked,
         how: OpenIn,
     ) -> Result<(), EngineError> {
-        (**self).open_picked(name, line, buffer, how)
+        (**self).open_picked(target, how)
     }
     fn rename_file(
         &self,
@@ -1344,12 +1337,10 @@ impl EngineOps for FakeOps {
     }
     fn open_picked(
         &self,
-        name: &str,
-        line: Option<u64>,
-        buffer: bool,
+        target: &view_core::native::picker::Picked,
         how: OpenIn,
     ) -> Result<(), EngineError> {
-        self.record(format!("open_picked({name},{line:?},{buffer},{how:?})"))
+        self.record(format!("open_picked({target:?},{how:?})"))
     }
     fn rename_file(
         &self,
@@ -1662,9 +1653,7 @@ impl EngineOps for SlowOps {
     }
     fn open_picked(
         &self,
-        _name: &str,
-        _line: Option<u64>,
-        _buffer: bool,
+        _target: &view_core::native::picker::Picked,
         _how: OpenIn,
     ) -> Result<(), EngineError> {
         Ok(())

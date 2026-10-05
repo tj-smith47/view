@@ -478,7 +478,7 @@ struct Route {
     /// connection, so a shared slot would let one of the three write over
     /// another for good.
     deferred_notify_sink: Option<Msg>,
-    /// The newest `Msg::PickerBufferList` an attached-but-full sink refused,
+    /// The newest `Msg::PickerBuffers` an attached-but-full sink refused,
     /// held for the next routing attempt to retry.
     ///
     /// One slot, on the same terms as [`Route::deferred_probe`]: a picker
@@ -936,7 +936,7 @@ impl PumpShared {
         self.route_held(msg, Held::NotifySink);
     }
 
-    /// Routes a `Msg::PickerBufferList` without ever dropping it on a full
+    /// Routes a `Msg::PickerBuffers` without ever dropping it on a full
     /// sink, and without blocking, on the same terms as
     /// [`route_probe_reply`](Self::route_probe_reply).
     ///

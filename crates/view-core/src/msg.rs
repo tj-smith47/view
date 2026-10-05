@@ -455,7 +455,7 @@ pub enum Msg {
     /// replaces what `Model.buffers` held: nvim answers with the list, so
     /// a diff here would be a second reading of the same fact.
     ///
-    /// Distinct from [`Msg::PickerBufferList`], which is the picker's own
+    /// Distinct from [`Msg::PickerBuffers`], which is the picker's own
     /// RPC reply and carries names alone.
     BufferList {
         buffers: Vec<crate::model::BufferEntry>,
@@ -791,13 +791,13 @@ pub enum Msg {
     },
     /// The decoded answer to one `RpcCall::ListBuffers`, resolving
     /// `Source::Buffers`'s corpus; see
-    /// `docs/picker-buffer-list-wire-capture.md`. `names` is each listed
-    /// buffer's path, empty string standing for nvim's own `[No Name]`
-    /// scratch buffer. Generation-gated on the same terms as
+    /// `docs/picker-buffer-list-wire-capture.md`. `buffers` is each listed
+    /// buffer's handle and path, an empty path standing for nvim's own
+    /// `[No Name]` scratch buffer. Generation-gated on the same terms as
     /// `PickerResults`.
-    PickerBufferList {
+    PickerBuffers {
         generation: u64,
-        names: Vec<String>,
+        buffers: Vec<(u64, String)>,
     },
     /// The window nvim opened for one of view's own surfaces, answering
     /// one `RpcCall::OpenNativeWindow`. Binding the handle to the surface
@@ -1657,8 +1657,8 @@ pub enum Effect {
     ///
     /// `resolved` carries a corpus `view-native` cannot gather itself:
     /// `Source::Buffers`'s listed-buffer names, decoded from
-    /// `Msg::PickerBufferList` (the RPC reply only `view-engine` can issue,
-    /// per the crate boundary -- see `update::update`'s `PickerBufferList`
+    /// `Msg::PickerBuffers` (the RPC reply only `view-engine` can issue,
+    /// per the crate boundary -- see `update::update`'s `PickerBuffers`
     /// arm). `Some` replaces the worker's cached corpus for `source` before
     /// matching; `None` reuses whatever corpus is already cached for it,
     /// which is every query after the first for `Source::Files` (the worker
@@ -2386,7 +2386,7 @@ pub enum RpcCall {
     /// Enumerates listed, loaded buffers for `Source::Buffers`, tagged
     /// `generation` (`PickerState::generation` at the moment `update()`
     /// emitted this). Async like `GetDefaultHl`: the reply decodes on the
-    /// reader thread and routes back as `Msg::PickerBufferList`. See
+    /// reader thread and routes back as `Msg::PickerBuffers`. See
     /// `docs/picker-buffer-list-wire-capture.md` for the exact
     /// `nvim_exec_lua` chunk and its `buflisted`-filtered, error-degrades-
     /// to-empty contract.

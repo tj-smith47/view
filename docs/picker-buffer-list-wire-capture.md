@@ -101,7 +101,7 @@ explanation and stays out of the stuck-with-neither state.
   `nvim_exec_lua` with the chunk above, tagged
   `Waiter::BufferList { generation }`, mirroring `request_probe`'s
   `Waiter::HlProbe` shape exactly: async, blocks nothing, decodes on the reader
-  thread, routes to `pump` as `Msg::PickerBufferList { generation, names }`
+  thread, routes to `pump` as `Msg::PickerBuffers { generation, buffers }`
   (new `Held` slot in `damage.rs`, alongside `Held::Probe`/`Held::Claims`).
 - The reply's `name` field is used as-is for a real path; an empty string is
   rendered as `[No Name]` by the picker's `PickerItem` label; it stays in the

@@ -1027,7 +1027,10 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // handing it to the worker as `resolved`, gated on the generation
         // still being the picker's own (see `Effect::PickerQuery`'s doc for
         // why `Source::Buffers` alone needs `resolved` at all)
-        Msg::PickerBufferList { generation, names } => {
+        Msg::PickerBuffers {
+            generation,
+            buffers,
+        } => {
             let Some(p) = model.picker_mut() else {
                 return Vec::new();
             };
@@ -1035,14 +1038,10 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 return Vec::new();
             }
             let needle = p.query().to_string();
-            let items = names
+            let items = buffers
                 .into_iter()
-                .map(|name| {
-                    crate::native::picker::PickerItem::new(if name.is_empty() {
-                        "[No Name]".to_string()
-                    } else {
-                        name
-                    })
+                .map(|(handle, name)| {
+                    crate::native::picker::PickerItem::listed_buffer(handle, name)
                 })
                 .collect();
             vec![Effect::PickerQuery {
