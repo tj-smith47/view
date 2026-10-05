@@ -84,6 +84,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         UiEvent::GridDestroy { grid } => {
             let grid = GridId(grid);
             model.cmdline_floats.closed(grid);
+            model.surface_conflicts.forget_float(grid);
             forget_window_status(model, grid);
             let native = native_pane_at(model, grid);
             let mut effects = place(model, GridEvent::Destroy { grid });
@@ -172,6 +173,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         UiEvent::WinClose { grid } => {
             let grid = GridId(grid);
             model.cmdline_floats.closed(grid);
+            model.surface_conflicts.forget_float(grid);
             forget_window_status(model, grid);
             let native = native_pane_at(model, grid);
             let mut effects = place(model, GridEvent::Close { grid });

@@ -554,14 +554,13 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
 /// The bar is [`take_complaint`]'s, with the identity half left out
 /// because a placement carries none: the rect claims a surface view draws
 /// ([`surfaces::claims_at`]), a channel of that surface is already reported
-/// held, and the startup window or the complaint grace is still open. A
-/// float standing in the corner column of a float already taken this way
-/// ([`surfaces::corner_edge`]) counts as over the message area wherever
-/// down that column it sits: a notifier stacking boxes down the corner
-/// places a late complaint below the area the boxes above it fill. Every
-/// other float -- a picker, a hover, a completion menu, anything outside
-/// that window -- is classified in the same arithmetic and paints on the
-/// frame it arrived for.
+/// held, and the startup window or the complaint grace is still open.
+/// Inside those, a float elsewhere over the notifier corner column is
+/// judged by its text ([`hold_for_text`]): a notifier stacking boxes down
+/// the corner places a late complaint below the message area. Every other
+/// float -- a picker, a hover, a completion menu, anything outside that
+/// window -- is classified in the same arithmetic and paints on the frame
+/// it arrived for.
 ///
 /// A holder is suspected as well as known: while the message area's
 /// replaced global is unread the middle term cannot be evaluated at all, so
@@ -569,9 +568,11 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
 /// judgment over it when the reading lands.
 ///
 /// The cost, stated: one round trip of delay for a benign float that lands
-/// in the message area's corner while a channel of that surface is known
-/// held, and nothing at all for every other float. The paint loop waits on
-/// none of it -- the flag is model state, and the rows lift it.
+/// in the message area's corner, or over the notifier corner column during
+/// the startup window or the grace, while a holder of the message area is
+/// known or suspected, and nothing at all for every other float. The paint
+/// loop waits on none of it -- the flag is model state, and the rows lift
+/// it.
 pub(super) fn on_float_placed(
     model: &mut Model,
     grid: crate::grid::registry::GridId,
@@ -607,59 +608,54 @@ pub(super) fn on_float_placed(
     {
         return Vec::new();
     }
-    let edge = surfaces::corner_edge(row, col, width, height, model);
     let over_messages = surfaces::claims_window_at(
         (win, anchor),
         (row, col),
         (width, height),
         surfaces::FloatAnchor::NorthWest,
         model,
-    ) == Some(Surface::Messages)
-        || edge.is_some_and(|edge| model.surface_conflicts.continues_stack(edge));
+    ) == Some(Surface::Messages);
     if !over_messages {
-        // nvim can place a stack's newest box ahead of the boxes above it
-        // in one batch, so a corner float waits for a box of its column
-        if let Some(edge) = edge {
-            model
-                .surface_conflicts
-                .note_stack_candidate(win, grid, edge);
-        }
-        return Vec::new();
+        return hold_for_text(model, grid, win, (row, col), (width, height));
     }
-    take_placed(model, grid, win, edge)
-}
-
-/// Takes a float placed over the message area while a holder of it is
-/// known or suspected, with every float already placed in the same corner
-/// column ([`surfaces::corner_edge`]) during the window: each is held off
-/// the screen, and its rows are asked for once the holder is known.
-fn take_placed(
-    model: &mut Model,
-    grid: crate::grid::registry::GridId,
-    win: u64,
-    edge: Option<i64>,
-) -> Vec<Effect> {
-    let mut effects = Vec::new();
-    if model.surface_conflicts.channel_held(Surface::Messages) {
-        if !model.surface_conflicts.claim_complaint(win, Some(grid)) {
-            return effects;
-        }
-        effects.push(Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win }));
-    } else if !model.surface_conflicts.hold_for_sink_read(win, grid) {
+    if !model.surface_conflicts.channel_held(Surface::Messages) {
         // the suspected half: until the reading arrives, "no holder is
         // known" and "no holder is there" are the same answer, and a timer
         // firing at a fixed offset from `VimEnter` can beat that round trip
         // over a slow link. Held on the same terms and classified by the
         // reading
-        return effects;
+        if model.surface_conflicts.hold_for_sink_read(win, grid) {
+            model.dirty |= model.engine.withhold_float(grid, true);
+        }
+        return Vec::new();
+    }
+    if !model.surface_conflicts.claim_complaint(win, Some(grid)) {
+        return Vec::new();
     }
     model.dirty |= model.engine.withhold_float(grid, true);
-    for (win, grid) in model.surface_conflicts.note_stack_edge(edge) {
-        if model.engine.grids().pane_origin(grid).is_some() {
-            effects.extend(take_placed(model, grid, win, None));
-        }
+    vec![Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win })]
+}
+
+/// Holds a float placed over the notifier corner column outside the
+/// message area ([`surfaces::over_notifier_corner`]) while a holder of
+/// the message area is known or suspected, and asks for its rows: rows
+/// that read as a complaint take it down, and any other rows give it back
+/// where its owner placed it ([`on_float_rows`]).
+fn hold_for_text(
+    model: &mut Model,
+    grid: crate::grid::registry::GridId,
+    win: u64,
+    (row, col): (i64, i64),
+    (width, height): (u16, u16),
+) -> Vec<Effect> {
+    if !surfaces::over_notifier_corner(row, col, width, height, model)
+        || !model.surface_conflicts.messages_holder_possible()
+        || !model.surface_conflicts.claim_on_text(win, grid)
+    {
+        return Vec::new();
     }
-    effects
+    model.dirty |= model.engine.withhold_float(grid, true);
+    vec![Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win })]
 }
 
 /// Takes a float into the palette's open command line, and answers whether
@@ -2851,18 +2847,27 @@ mod tests {
     /// A 118x30 terminal whose nvim grid is 29 rows, with a notifier of the
     /// user's config standing at `vim.notify`.
     fn notifier_session() -> Model {
-        let mut model = Model::with_term_size(118, 30);
+        notifier_on(118, 29)
+    }
+
+    /// A terminal one row taller than a `width` by `height` nvim grid, with
+    /// a notifier of the user's config standing at `vim.notify`.
+    fn notifier_on(width: u16, height: u16) -> Model {
+        let mut model = Model::with_term_size(width, height + 1);
         let _ = update(
             &mut model,
             Msg::Redraw(vec![UiEvent::GridResize {
                 grid: 1,
-                width: 118,
-                height: 29,
+                width: u64::from(width),
+                height: u64::from(height),
             }]),
         );
         let _ = notifier_takes_the_messages(&mut model);
         model
     }
+
+    /// The grids the corner rule is stated against.
+    const CORNER_GRIDS: [(u16, u16); 3] = [(118, 29), (80, 23), (60, 19)];
 
     fn float_at(grid: u64, win: u64, row: u64, col: u64) -> UiEvent {
         UiEvent::WinFloatPos {
@@ -2908,9 +2913,31 @@ mod tests {
             .any(|e| matches!(e, Effect::Rpc(RpcCall::ReadFloatRows { win: w }) if *w == win))
     }
 
+    fn closes(effects: &[Effect], win: u64) -> bool {
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::CloseFloat { win: w }) if *w == win))
+    }
+
+    /// Whether `text` reached view's own toast stack.
+    fn toasted(model: &Model, text: &str) -> bool {
+        format!("{:?}", model.engine.messages.entries).contains(text)
+    }
+
+    /// The rows a notifier's complaint about view holding `vim.notify`
+    /// carries.
+    const COMPLAINT_ROWS: [&str; 3] = ["", "vim.notify has been overwritten", ""];
+
+    /// Answers `win`'s rows with `lines`.
+    fn rows(model: &mut Model, win: u64, lines: &[&str]) -> Vec<Effect> {
+        let lines = lines.iter().map(|line| (*line).to_owned()).collect();
+        update(model, Msg::FloatRows { win, lines })
+    }
+
     /// The stack a notifier opens at launch: three boxes over the message
     /// area and a fourth, the complaint, stacked below them and outside it,
-    /// all four in one batch with the newest placed first.
+    /// all four in one batch with the newest placed first. The fourth is
+    /// held for its rows, which read as a complaint and take it down.
     #[test]
     fn a_complaint_stacked_below_the_message_area_is_withheld() {
         let mut model = notifier_session();
@@ -2938,74 +2965,178 @@ mod tests {
         );
         assert!(!painted(&model, 10), "and stays off through its slide");
         assert!(!reads(&step, 1007), "read once: {step:?}");
+        let closed = rows(&mut model, 1007, &COMPLAINT_ROWS);
+        assert!(closes(&closed, 1007), "{closed:?}");
+        assert!(!toasted(&model, "overwritten"), "history only");
 
         let mut fresh = notifier_session();
         let effects = update(
             &mut fresh,
-            Msg::Redraw(vec![
-                sized(10, 3, 10),
-                sized(7, 3, 5),
-                float_at(10, 1007, 16, 115),
-                float_at(7, 1004, 1, 115),
-            ]),
+            Msg::Redraw(vec![sized(10, 3, 10), float_at(10, 1007, 16, 115)]),
         );
-        assert!(!painted(&fresh, 10), "placed ahead of the box above it");
+        assert!(!painted(&fresh, 10), "held with no box above it");
         assert!(reads(&effects, 1007), "{effects:?}");
     }
 
-    /// Outside the window, or away from the stack's column, a float is
-    /// nobody's complaint and paints on the frame it arrived for.
+    /// The complaint as a notifier that opens its box at full width places
+    /// it: 61 cells wide on a 118-column grid, in one step, reaching past
+    /// the corner column's inner side.
     #[test]
-    fn a_float_after_the_window_or_in_another_corner_is_shown() {
+    fn a_complaint_placed_at_full_width_in_one_step_is_taken() {
+        let mut model = notifier_session();
+        let effects = update(
+            &mut model,
+            Msg::Redraw(vec![sized(10, 61, 10), float_at(10, 1007, 16, 57)]),
+        );
+        assert!(!painted(&model, 10), "the complaint reached the frame");
+        assert!(reads(&effects, 1007), "{effects:?}");
+        let closed = rows(&mut model, 1007, &COMPLAINT_ROWS);
+        assert!(closes(&closed, 1007), "{closed:?}");
+        assert!(!toasted(&model, "overwritten"), "history only");
+    }
+
+    /// A progress box at the bottom right, updating five times before
+    /// anyone types: held for its first rows, then on screen at every
+    /// update where its plugin put it, never closed and never a toast.
+    #[test]
+    fn a_progress_box_in_the_corner_is_shown_at_every_update() {
+        for (grid_w, grid_h) in CORNER_GRIDS {
+            let mut model = notifier_on(grid_w, grid_h);
+            let (w, h) = (u64::from(grid_w), u64::from(grid_h));
+            let effects = update(
+                &mut model,
+                Msg::Redraw(vec![sized(12, 18, 2), float_at(12, 1009, h - 2, w - 18)]),
+            );
+            assert!(reads(&effects, 1009), "{w}x{h}: {effects:?}");
+            assert!(!painted(&model, 12), "{w}x{h}: held for one round trip");
+            let answered = rows(&mut model, 1009, &["Indexing 1/5"]);
+            assert!(!closes(&answered, 1009), "{w}x{h}: {answered:?}");
+            assert!(painted(&model, 12), "{w}x{h}: shown once read");
+            for update_no in 2..=5 {
+                let step = update(
+                    &mut model,
+                    Msg::Redraw(vec![
+                        sized(12, 16 + update_no, 2),
+                        float_at(12, 1009, h - 2, w - 16 - update_no),
+                    ]),
+                );
+                assert!(step.is_empty(), "{w}x{h} update {update_no}: {step:?}");
+                assert!(painted(&model, 12), "{w}x{h} update {update_no}");
+            }
+            assert!(!toasted(&model, "Indexing"), "{w}x{h}: no view toast");
+        }
+    }
+
+    /// A float at the right edge whose rows read as anything but a
+    /// complaint goes back on screen, and stays there when it moves.
+    #[test]
+    fn a_float_at_the_right_edge_with_ordinary_text_is_shown() {
+        for (grid_w, grid_h) in CORNER_GRIDS {
+            let mut model = notifier_on(grid_w, grid_h);
+            let (w, h) = (u64::from(grid_w), u64::from(grid_h));
+            let effects = update(
+                &mut model,
+                Msg::Redraw(vec![
+                    sized(11, 30, 4),
+                    float_at(11, 1008, h / 2 + 1, w - 30),
+                ]),
+            );
+            assert!(reads(&effects, 1008), "{w}x{h}: {effects:?}");
+            let answered = rows(&mut model, 1008, &["src/main.rs  42 lines"]);
+            assert!(answered.is_empty(), "{w}x{h}: {answered:?}");
+            assert!(painted(&model, 11), "{w}x{h}");
+            let moved = update(&mut model, Msg::Redraw(vec![float_at(11, 1008, 2, w - 30)]));
+            assert!(
+                moved.is_empty() && painted(&model, 11),
+                "{w}x{h}: {moved:?}"
+            );
+            assert!(!toasted(&model, "src/main.rs"), "{w}x{h}");
+        }
+    }
+
+    /// A float that stops short of the corner column, or any float once
+    /// the window and the grace have closed, paints on the frame it arrived
+    /// for. A float touching the column is held whatever its height.
+    #[test]
+    fn only_a_float_over_the_corner_column_during_the_window_is_held() {
+        let mut model = notifier_session();
+        let short = update(
+            &mut model,
+            Msg::Redraw(vec![sized(11, 30, 5), float_at(11, 1008, 16, 29)]),
+        );
+        assert!(painted(&model, 11) && short.is_empty(), "{short:?}");
+        let touching = update(
+            &mut model,
+            Msg::Redraw(vec![sized(12, 30, 5), float_at(12, 1009, 16, 30)]),
+        );
+        assert!(
+            !painted(&model, 12) && reads(&touching, 1009),
+            "{touching:?}"
+        );
+        let tall = update(
+            &mut model,
+            Msg::Redraw(vec![sized(13, 18, 20), float_at(13, 1010, 5, 100)]),
+        );
+        assert!(!painted(&model, 13) && reads(&tall, 1010), "{tall:?}");
+
         let mut late = notifier_session();
-        first_box_taken(&mut late);
         key(&mut late);
         expire_grace(&mut late);
         let effects = update(
             &mut late,
-            Msg::Redraw(vec![sized(10, 3, 10), float_at(10, 1007, 16, 115)]),
+            Msg::Redraw(vec![sized(10, 61, 10), float_at(10, 1007, 16, 57)]),
         );
         assert!(painted(&late, 10), "a float after the window is shown");
         assert!(!reads(&effects, 1007), "{effects:?}");
-
-        for (row, col) in [(16, 0), (1, 0), (20, 40)] {
-            let mut model = notifier_session();
-            first_box_taken(&mut model);
-            let effects = update(
-                &mut model,
-                Msg::Redraw(vec![sized(11, 30, 5), float_at(11, 1008, row, col)]),
-            );
-            assert!(painted(&model, 11), "({row}, {col}) is shown");
-            assert!(!reads(&effects, 1008), "({row}, {col}): {effects:?}");
-        }
     }
 
-    /// A notification raised in the stack's column during the window is
-    /// read, closed and shown in view's own toast stack.
+    /// A replacement engine issues window handles and grids from the same
+    /// numbers again, so a float the last engine released never stands for
+    /// one of the next engine's.
     #[test]
-    fn a_notification_stacked_with_the_complaint_reaches_views_toasts() {
+    fn a_float_released_under_the_last_engine_never_frees_the_next_ones() {
         let mut model = notifier_session();
-        first_box_taken(&mut model);
         let _ = update(
             &mut model,
-            Msg::Redraw(vec![sized(10, 30, 4), float_at(10, 1007, 16, 88)]),
+            Msg::Redraw(vec![sized(10, 61, 10), float_at(10, 1007, 16, 57)]),
         );
-        assert!(!painted(&model, 10));
-        let closed = update(
-            &mut model,
-            Msg::FloatRows {
-                win: 1007,
-                lines: vec!["3 plugin updates are ready".to_owned()],
-            },
-        );
+        let _ = rows(&mut model, 1007, &["Indexing 1/5"]);
+        assert!(painted(&model, 10));
+        model.forget_engine_conflicts();
+        let _ = notifier_takes_the_messages(&mut model);
+        let effects = update(&mut model, Msg::Redraw(vec![float_at(10, 1007, 16, 57)]));
         assert!(
-            closed
-                .iter()
-                .any(|e| matches!(e, Effect::Rpc(RpcCall::CloseFloat { win: 1007 }))),
-            "{closed:?}"
+            !painted(&model, 10),
+            "the next engine's complaint reached the frame"
         );
-        let toasts = format!("{:?}", model.engine.messages.entries);
-        assert!(toasts.contains("3 plugin updates are ready"), "{toasts}");
+        assert!(reads(&effects, 1007), "{effects:?}");
+    }
+
+    /// A window nvim closes takes its claim with it, so the claims never
+    /// outnumber the windows standing.
+    #[test]
+    fn a_closed_window_takes_its_claim_with_it() {
+        let mut model = notifier_session();
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![sized(10, 18, 2), float_at(10, 1007, 26, 100)]),
+        );
+        let _ = rows(&mut model, 1007, &["Indexing 1/5"]);
+        assert_eq!(model.surface_conflicts.claimed(), 1);
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![UiEvent::WinClose { grid: 10 }]),
+        );
+        assert_eq!(model.surface_conflicts.claimed(), 0, "WinClose");
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![sized(11, 18, 2), float_at(11, 1008, 26, 100)]),
+        );
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![UiEvent::GridDestroy { grid: 11 }]),
+        );
+        assert_eq!(model.surface_conflicts.claimed(), 0, "GridDestroy");
     }
 
     /// The suspected half of the ruling: before the probe answers, "no
@@ -3818,6 +3949,8 @@ mod tests {
     fn palette_session() -> Model {
         let mut model = captured_session();
         model.palette_enabled = true;
+        // nobody stands at `vim.notify`, so no float is held for its text
+        sink_read(&mut model, false);
         model
     }
 
@@ -4187,6 +4320,7 @@ mod tests {
         let mut model = captured_session();
         model.palette_enabled = false;
         model.attach_surfaces(vec![Ext::Messages, Ext::Tabline]);
+        sink_read(&mut model, false);
         open_cmdline(&mut model);
         open_float(&mut model, 11, 1008, MENU);
         assert!(!withheld(&model, 11));
@@ -4301,6 +4435,7 @@ mod tests {
             Some(Surface::Popupmenu)
         );
         restart(&mut model);
+        sink_read(&mut model, false);
         open_float(&mut model, 11, 1003, MENU);
         assert!(!withheld(&model, 11), "the replacement's float is hidden");
         assert_eq!(crate::native::surfaces::claims(&sighting, &model), None);

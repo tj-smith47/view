@@ -500,17 +500,17 @@ pub fn over_notice_column(
     landing(row, col, width, height, anchor, model).is_some_and(|(_, over)| over)
 }
 
-/// The outer column of the grid's own notifier corner that a float over
-/// this rect, its top-left corner at `row` and `col`, stands against.
-/// `None` for a float reaching out of that corner column or taller than
-/// half the grid.
+/// Whether a float over this rect, its top-left corner at `row` and `col`,
+/// shares a cell with the grid's own notifier corner column: the
+/// full-height column on the notice anchor's side, as wide as
+/// [`notice_column_width`].
 ///
-/// Every box a notifier stacks down that corner shares this column,
-/// wherever down the corner the box lands.
+/// Overlap is enough, since a notifier that opens a box at full width
+/// reaches past the column's inner side.
 #[must_use]
-pub fn corner_edge(row: i64, col: i64, width: u16, height: u16, model: &Model) -> Option<i64> {
+pub fn over_notifier_corner(row: i64, col: i64, width: u16, height: u16, model: &Model) -> bool {
     let (grid_w, grid_h) = model.engine.grid().size();
-    let (top, left, bottom, right) = span(
+    let Some((_, left, _, right)) = span(
         row,
         col,
         width,
@@ -518,15 +518,14 @@ pub fn corner_edge(row: i64, col: i64, width: u16, height: u16, model: &Model) -
         FloatAnchor::NorthWest,
         grid_w,
         grid_h,
-    )?;
-    if bottom - top + 1 > i64::from(grid_h) / 2 {
-        return None;
-    }
+    ) else {
+        return false;
+    };
     let corner_width = i64::from(notice_column_width(grid_w));
     if model.notice_anchor().is_left_corner() {
-        (right < corner_width).then_some(left)
+        left < corner_width
     } else {
-        (left >= i64::from(grid_w) - corner_width).then_some(right)
+        right >= i64::from(grid_w) - corner_width
     }
 }
 
@@ -704,11 +703,12 @@ pub struct SurfaceConflicts {
     /// The floating windows the take-down has already asked rows of,
     /// whether or not the answer was filed, so a scan that sights one again
     /// before its close lands does not record it twice. Each carries the
-    /// bar its reply is held to, decided at the sighting. Emptied only by
-    /// [`SurfaceConflicts::forget_engine`]: within one engine the handles
-    /// stay valid names for windows that are gone, and the set is bounded
-    /// by the floats one startup opens, but a replacement process issues
-    /// handles from 1000 again.
+    /// bar its reply is held to, decided at the sighting. Bounded by the
+    /// windows standing: a claim goes when nvim closes its window
+    /// ([`SurfaceConflicts::forget_float`]), a claim given back goes once
+    /// the startup window and the grace have closed, and
+    /// [`SurfaceConflicts::forget_engine`] empties it, since a replacement
+    /// process issues handles from 1000 again.
     complaints: Vec<Complaint>,
     /// Whether the user has acted -- a key, a click or a paste -- which is
     /// where spec 5.5 ends the startup conflict window.
@@ -745,16 +745,6 @@ pub struct SurfaceConflicts {
     /// through the classification a float over a held channel takes at its
     /// placement.
     sink_holds: Vec<(u64, crate::grid::registry::GridId)>,
-    /// The corner columns ([`corner_edge`]) of the floats this engine's
-    /// startup took at their placement, as a complaint or held for the
-    /// sink reading. A notifier counts the boxes it stacked above a late
-    /// one, so the late one lands below the message area, in the same
-    /// column.
-    stack_edges: Vec<i64>,
-    /// The floats placed in a corner column during the window and left on
-    /// screen, with the grid each draws into and its column. nvim can place
-    /// a stack's newest box ahead of the boxes above it in one batch.
-    stack_candidates: Vec<(u64, crate::grid::registry::GridId, i64)>,
     /// Which engine the deadlines armed this session belong to. A timer
     /// thread sleeping on a dead engine's behalf still wakes, and the
     /// expiry it sends names this value as it was when the deadline was
@@ -1051,44 +1041,45 @@ impl SurfaceConflicts {
         true
     }
 
-    /// Notes the corner column of a float just taken at its placement, and
-    /// hands back every float placed in that column earlier in the window
-    /// and left on screen, for the caller to take.
-    pub fn note_stack_edge(
-        &mut self,
-        edge: Option<i64>,
-    ) -> Vec<(u64, crate::grid::registry::GridId)> {
-        let Some(edge) = edge.filter(|edge| !self.stack_edges.contains(edge)) else {
-            return Vec::new();
-        };
-        self.stack_edges.push(edge);
-        let (stacked, rest) = std::mem::take(&mut self.stack_candidates)
-            .into_iter()
-            .partition(|candidate| candidate.2 == edge);
-        self.stack_candidates = rest;
-        stacked
-            .into_iter()
-            .map(|(win, grid, _)| (win, grid))
-            .collect()
+    /// Claims `win`'s float, drawn into `grid`, under the grace's bar
+    /// whatever the startup window says: its rows decide, and rows that do
+    /// not read as a complaint give it back
+    /// ([`Self::reads_as_complaint`]). Answers whether this call claimed
+    /// it.
+    pub fn claim_on_text(&mut self, win: u64, grid: crate::grid::registry::GridId) -> bool {
+        if self.is_complaint(win) {
+            return false;
+        }
+        self.complaints.push(Complaint {
+            win,
+            unconditional: false,
+            grid: Some(grid),
+            released: false,
+        });
+        true
     }
 
-    /// Notes a float placed in corner column `edge` during the window and
-    /// left on screen, which a box of its stack taken later takes with it.
-    pub fn note_stack_candidate(
-        &mut self,
-        win: u64,
-        grid: crate::grid::registry::GridId,
-        edge: i64,
-    ) {
-        self.stack_candidates.retain(|candidate| candidate.0 != win);
-        self.stack_candidates.push((win, grid, edge));
-    }
-
-    /// Whether a float standing in corner column `edge` continues a stack
-    /// this engine already took a float from.
+    /// Whether a holder of the message area is known, or could still be:
+    /// the channel was found held, or the reading that would say has not
+    /// arrived.
     #[must_use]
-    pub fn continues_stack(&self, edge: i64) -> bool {
-        self.stack_edges.contains(&edge)
+    pub fn messages_holder_possible(&self) -> bool {
+        self.channel_held(Surface::Messages) || !self.sink_read
+    }
+
+    /// Drops the claim on the float drawn into `grid`, whose window nvim
+    /// closed.
+    pub fn forget_float(&mut self, grid: crate::grid::registry::GridId) {
+        self.complaints
+            .retain(|complaint| complaint.grid != Some(grid));
+    }
+
+    /// Drops every claim given back to its owner once the startup window
+    /// and the grace have both closed, when no placement is held any more.
+    fn settle(&mut self) {
+        if !self.startup_window_open() && !self.complaint_grace {
+            self.complaints.retain(|complaint| !complaint.released);
+        }
     }
 
     /// Marks the reading arrived and hands back every float held for it,
@@ -1104,6 +1095,12 @@ impl SurfaceConflicts {
     #[must_use]
     pub fn is_complaint(&self, win: u64) -> bool {
         self.complaints.iter().any(|complaint| complaint.win == win)
+    }
+
+    /// How many floating windows the take-down holds a claim on.
+    #[cfg(test)]
+    pub(crate) fn claimed(&self) -> usize {
+        self.complaints.len()
     }
 
     /// Whether `win` was sighted inside the startup window, where its rows
@@ -1127,6 +1124,7 @@ impl SurfaceConflicts {
     /// closing the startup conflict window for good.
     pub fn note_user_acted(&mut self) {
         self.typed = true;
+        self.settle();
     }
 
     /// Opens the complaint grace, and answers whether this call is what
@@ -1157,6 +1155,7 @@ impl SurfaceConflicts {
     pub fn end_complaint_grace(&mut self, generation: u64) {
         if generation == self.generation {
             self.complaint_grace = false;
+            self.settle();
         }
     }
 
@@ -1171,10 +1170,12 @@ impl SurfaceConflicts {
     /// enum rather than written down, so a surface added later is matched
     /// without a second list to remember.
     ///
-    /// Only consulted for a float sighted after the user has acted: inside
-    /// the startup window every complaint over a surface whose channel was
-    /// found held is taken, text unread, and which bar applies is fixed at
-    /// the sighting ([`Self::claim_complaint`]). This is the narrower bar
+    /// Consulted for a float sighted after the user has acted, and for one
+    /// placed over the notifier corner outside the message area
+    /// ([`Self::claim_on_text`]): inside the startup window every
+    /// complaint over a surface whose channel was found held is taken,
+    /// text unread, and which bar applies is fixed at the sighting
+    /// ([`Self::claim_complaint`]). This is the narrower bar
     /// the grace runs under, and the cost of getting it wrong is a window
     /// closed under someone's hand. The cost the other way is accepted and
     /// pinned: a window the user opened that quotes one of these names --
@@ -1199,7 +1200,6 @@ impl SurfaceConflicts {
     /// | `complaints` | window handles, and a fresh process issues them from 1000 again: a handle held past the death names one of the replacement's own windows, and the reply to a read of it would file a live window's rows into the history and close it |
     /// | `typed` | the replacement sources the config again, so whatever drew over a surface draws again, and a session that had been typed at would leave those windows stacked beside the re-raised notice |
     /// | `complaint_grace` | a deadline armed against the dead engine's report, and the replacement's own report arms its own |
-    /// | `stack_edges`, `stack_candidates` | the replacement sources the config again, and its notifier stacks its boxes afresh in windows of its own |
     /// | `sink_read`, `sink_holds` | the attach re-reads the message area's replaced global per engine, so the replacement is back inside the window where a float over a native surface is held until that reading lands; the held handles belong to the dead process |
     /// | `generation` | bumped: the dead engine's deadlines are still sleeping in their timer threads, and their expiries must find nobody to answer to |
     /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config draws the same windows -- forgetting it would raise a second notice per window for one conflict |
@@ -1212,8 +1212,6 @@ impl SurfaceConflicts {
         self.complaint_grace = false;
         self.sink_read = false;
         self.sink_holds.clear();
-        self.stack_edges.clear();
-        self.stack_candidates.clear();
         self.held.clear();
         self.generation += 1;
     }
@@ -2079,5 +2077,31 @@ mod tests {
             ]),
             "a window quoting no surface and no function is the user's to close"
         );
+    }
+
+    /// A float given back to its owner keeps its claim only while a later
+    /// placement of it could still be held: once the startup window and
+    /// the grace have both closed, nothing is, and the claim goes. A claim
+    /// still waiting on its rows stays, or the reply would find no claim
+    /// and leave the float held.
+    #[test]
+    fn a_released_claim_goes_once_the_window_and_the_grace_have_closed() {
+        let grid = crate::grid::registry::GridId;
+        let mut conflicts = SurfaceConflicts::default();
+        assert!(conflicts.arm_complaint_grace());
+        assert!(conflicts.claim_complaint(1007, Some(grid(10))));
+        assert!(conflicts.claim_complaint(1008, Some(grid(11))));
+        assert_eq!(conflicts.release_complaint(1007), Some(grid(10)));
+        conflicts.note_user_acted();
+        assert_eq!(conflicts.claimed(), 2, "the grace still runs");
+        conflicts.end_complaint_grace(conflicts.engine_generation());
+        assert!(!conflicts.is_complaint(1007), "the grace has closed");
+        assert!(conflicts.is_complaint(1008), "still waiting on its rows");
+
+        let mut ungraced = SurfaceConflicts::default();
+        assert!(ungraced.claim_complaint(1007, Some(grid(10))));
+        assert_eq!(ungraced.release_complaint(1007), Some(grid(10)));
+        ungraced.note_user_acted();
+        assert!(!ungraced.is_complaint(1007), "the window has closed");
     }
 }

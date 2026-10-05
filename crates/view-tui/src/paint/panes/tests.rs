@@ -69,6 +69,8 @@ fn vsplit() -> Model {
     model.term_width = WIDTH;
     model.term_height = HEIGHT;
     model.caps = model.caps.with_unicode_boxes(DRAWS_BOX_GLYPHS);
+    // nobody stands at `vim.notify`, so no float waits for its text
+    let _ = update(&mut model, Msg::NotifySinkRead { foreign: false });
     let mut events = vec![
         UiEvent::GridResize {
             grid: 1,
@@ -1252,6 +1254,8 @@ const FLOAT_AT: (u16, u16) = (5, 30);
 /// The gapped split with a float opened over the gap between the tiles.
 fn tiled_float(gaps: bool) -> Tiles {
     let mut tiles = tiled(gaps);
+    // nobody stands at `vim.notify`, so the hover waits for no text read
+    let _ = update(&mut tiles.model, Msg::NotifySinkRead { foreign: false });
     let width = u64::try_from(FLOAT_LINES[0].chars().count()).unwrap_or(0);
     let mut events = vec![
         UiEvent::GridResize {

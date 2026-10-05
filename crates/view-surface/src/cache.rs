@@ -738,11 +738,11 @@ mod tests {
         ),
         (
             "view-core/src/native/surfaces.rs",
-            "fncorner_edge(row:i64,col:i64,width:u16,height:u16,model:&Model)->Option<i64>{",
+            "fnover_notifier_corner(row:i64,col:i64,width:u16,height:u16,model:&Model)->bool{",
             "engine.grid()",
-            "`corner_edge` places a float nvim just sent against the grid \
-             that placement lands on, for the complaint stack, and paints \
-             nothing",
+            "`over_notifier_corner` places a float nvim just sent against \
+             the grid that placement lands on, for the complaint's text \
+             hold, and paints nothing",
         ),
         (
             "view-core/src/native/speculate.rs",

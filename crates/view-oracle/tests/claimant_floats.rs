@@ -64,16 +64,6 @@ fn nvim_session(home: &std::path::Path) -> PtySession {
     recording(common::reference_nvim(home))
 }
 
-/// The `view.toml` this pin is stated against: the message surface native,
-/// which is what makes the plugin that used to draw it a superseded
-/// claimant.
-fn plant_notifications_on(home: &std::path::Path) {
-    let dir = common::xdg_home(home, "XDG_CONFIG_HOME").join("view");
-    std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");
-    std::fs::write(dir.join("view.toml"), "[native]\nnotifications = true\n")
-        .expect("the isolated view.toml must be writable");
-}
-
 /// Whether `needle` was ever written to the terminal.
 fn wrote(stream: &[u8], needle: &str) -> bool {
     stream
@@ -135,7 +125,6 @@ fn a_superseded_claimants_float_reaches_the_history_and_never_the_terminal() {
     let nvim_paths = common::ScratchPaths::new("claimant-float-nvim");
     common::plant_nvim_config(&view_paths.isolated_home, "claimant-float");
     common::plant_nvim_config(&nvim_paths.isolated_home, "claimant-float");
-    plant_notifications_on(&view_paths.isolated_home);
     warm_the_home(&view_paths.isolated_home);
 
     let mut reference = nvim_session(&nvim_paths.isolated_home);
