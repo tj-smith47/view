@@ -362,9 +362,9 @@ impl DvrLoop {
     }
 
     /// The scrub bar for frame `seq`: the clip's file name when `clip`
-    /// names one, with how many of its oldest frames were left out, how
-    /// far back the frame is and how far back the frames reach, then the
-    /// way out and the keys.
+    /// names one, how far back the frame is and how far back the frames
+    /// reach, the way out and the keys, then how many of the clip's oldest
+    /// frames were left out.
     fn bar(
         &self,
         seq: u64,
@@ -376,26 +376,26 @@ impl DvrLoop {
         let age = secs(seq);
         let reach = secs(self.ring.oldest().unwrap_or(seq));
         let flag = if waiting { WAITING } else { "" };
-        let (head, hint) = match clip {
+        let (head, hint, cut) = match clip {
             Some((path, left_out)) => {
                 let name = std::path::Path::new(path)
                     .file_name()
                     .map_or_else(|| path.into(), |n| n.to_string_lossy());
-                let head = match left_out {
-                    0 => format!("CLIP {name}"),
-                    n => format!("CLIP {name} ({n} oldest frames past [dvr] max_mb not loaded)"),
+                let cut = match left_out {
+                    0 => String::new(),
+                    n => format!("  ({n} oldest frames past [dvr] max_mb not loaded)"),
                 };
-                (head, CLIP_HINT)
+                (format!("CLIP {name}"), CLIP_HINT, cut)
             }
-            None => ("DVR".to_owned(), SCRUB_HINT),
+            None => ("DVR".to_owned(), SCRUB_HINT, String::new()),
         };
         if confirming {
             // the confirm over the frame names its own keys
-            return format!("{head}  -{age:.1}s of {reach:.1}s{flag}");
+            return format!("{head}  -{age:.1}s of {reach:.1}s{flag}{cut}");
         }
-        // the flag goes ahead of the legend, since a narrow terminal cuts
-        // the bar's end
-        format!("{head}  -{age:.1}s of {reach:.1}s{flag}  {hint}")
+        // the flag and the legend go ahead of the count, since a narrow
+        // terminal cuts the bar's end
+        format!("{head}  -{age:.1}s of {reach:.1}s{flag}  {hint}{cut}")
     }
 }
 
@@ -1359,12 +1359,25 @@ mod tests {
         assert!(oldest > 1, "the clip was cut, its oldest frame {oldest}");
         let bar = dvr.scrub_pass(&mut model).flatten().map(|(_, bar)| bar);
         let bar = bar.expect("the clip is not shown");
-        let head = format!(
-            "CLIP long.vdvr ({} oldest frames past [dvr] max_mb not loaded)",
+        let cut = format!(
+            "  ({} oldest frames past [dvr] max_mb not loaded)",
             oldest - 1
         );
-        assert!(bar.starts_with(&head), "{bar}");
+        assert!(bar.starts_with("CLIP long.vdvr  -"), "{bar}");
+        assert!(bar.ends_with(&cut), "{bar}");
         assert_eq!(told(&model, "not loaded"), 0, "a notice under the clip");
+    }
+
+    /// The clip bar of a cut clip under the name view gives an export,
+    /// read at 80 columns, still says how to close it.
+    #[test]
+    fn a_cut_clips_bar_keeps_its_close_key_on_an_80_column_terminal() {
+        let mut model = Model::with_term_size(80, 24);
+        let dvr = recorded(&mut model);
+        let bar = dvr.bar(6, false, Some(("/w/view-dvr-1759700000.vdvr", 40)), false);
+        let shown: String = bar.chars().take(80).collect();
+        assert!(shown.contains("q close"), "{shown}");
+        assert!(bar.contains("40 oldest frames"), "{bar}");
     }
 
     #[test]

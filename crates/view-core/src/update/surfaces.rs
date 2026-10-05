@@ -738,7 +738,8 @@ pub(super) fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
 /// The call that sizes `surface`'s window to `pct` of the grid nvim lays
 /// its windows in, along the axis its anchor sizes: columns for a left or
 /// right edge, rows for a top or bottom one. `None` while it has no
-/// window.
+/// window. Every windowed surface stacked on that edge shares the column
+/// or row the call sizes, so each one awaits the size.
 pub(super) fn window_size_call(
     model: &mut Model,
     surface: NativeSurface,
@@ -749,7 +750,15 @@ pub(super) fn window_size_call(
     let vertical = WinSplit::for_anchor(anchor).is_vertical();
     let (columns, rows) = model.engine.grids().global().size();
     let cells = crate::native::geometry::share(if vertical { columns } else { rows }, pct).max(1);
-    model.surfaces.ask_size(surface, cells);
+    for stacked in NativeSurface::ALL {
+        if stacked == surface
+            || (model.surfaces.windowed(stacked)
+                && model.surfaces.layout(stacked).anchor == anchor
+                && model.engine.grids().native_window(stacked).is_some())
+        {
+            model.surfaces.ask_size(stacked, cells);
+        }
+    }
     Some(Effect::Rpc(RpcCall::SetWindowSize {
         win: win.0,
         width: vertical.then_some(cells),

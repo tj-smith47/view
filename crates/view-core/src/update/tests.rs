@@ -19615,6 +19615,107 @@ fn a_size_still_on_its_way_to_nvim_is_no_width_set_in_nvim() {
     );
 }
 
+/// nvim placing `win`'s window, on grid `grid`, at `width` columns of the
+/// 80x24 grid against its right edge.
+fn right_sidebar_placed(grid: u64, win: crate::events::WinHandle, width: u64) -> Msg {
+    Msg::Redraw(vec![
+        UiEvent::WinPos {
+            grid,
+            win,
+            startrow: 0,
+            startcol: 80 - width,
+            width,
+            height: 24,
+        },
+        UiEvent::Flush,
+    ])
+}
+
+/// A width set in nvim is the share the resize keys step from. Kept only
+/// at a terminal resize, `<S-Right>` stepped the share view had last set
+/// and put the panel back below the width nvim gave it.
+#[test]
+fn a_width_set_in_nvim_is_the_share_the_resize_keys_step_from() {
+    use crate::native::geometry::{share, Anchor, NativeSurface, PANEL_WIDTH_STEP_PCT};
+    let mut m = sidebars_open(&[(NativeSurface::Agent, Anchor::Right, 30)]);
+    let _ = update(&mut m, right_sidebar_placed(AGENT_GRID, AGENT_WIN, 40));
+    assert_eq!(m.ai_panel_width_pct, 50);
+    let stepped = 50 + PANEL_WIDTH_STEP_PCT;
+    let taken = update(&mut m, key("<S-Right>"));
+    assert_eq!(
+        window_widths(&taken),
+        [(AGENT_WIN.0, Some(share(80, stepped)), None)]
+    );
+}
+
+/// A width set in nvim is the share the sidebar reopens at.
+#[test]
+fn a_width_set_in_nvim_is_the_share_a_reopen_takes() {
+    use crate::native::geometry::{Anchor, NativeSurface};
+    let mut m = sidebars_open(&[(NativeSurface::Agent, Anchor::Right, 30)]);
+    let _ = update(&mut m, right_sidebar_placed(AGENT_GRID, AGENT_WIN, 40));
+    let _ = update(&mut m, agent_toggle());
+    let reopened = update(&mut m, agent_toggle());
+    let size = reopened.iter().find_map(|effect| match effect {
+        Effect::Rpc(RpcCall::OpenNativeWindow { size, .. }) => Some(*size),
+        _ => None,
+    });
+    assert_eq!(size, Some(50), "{reopened:?}");
+}
+
+/// A terminal resize sizes a column two sidebars share by one request, and
+/// the placements nvim reports before answering it carry the cells the
+/// column stood at: neither sidebar takes those as a width set in nvim.
+#[test]
+fn a_stacked_sidebars_placement_during_a_terminal_resize_writes_no_share() {
+    use crate::native::geometry::{share, Anchor, NativeSurface};
+    let mut m = sidebars_open(&[
+        (NativeSurface::Tree, Anchor::Right, 20),
+        (NativeSurface::Agent, Anchor::Right, 35),
+    ]);
+    let column = u64::from(share(80, 35));
+    let mut events = vec![UiEvent::GridResize {
+        grid: 1,
+        width: 50,
+        height: 24,
+    }];
+    for (grid, win) in [(TREE_GRID, TREE_WIN), (AGENT_GRID, AGENT_WIN)] {
+        events.push(UiEvent::WinPos {
+            grid,
+            win,
+            startrow: 0,
+            startcol: 50 - column,
+            width: column,
+            height: 12,
+        });
+    }
+    events.push(UiEvent::Flush);
+    let taken = update(&mut m, Msg::Redraw(events));
+    assert_eq!(
+        window_widths(&taken),
+        [(TREE_WIN.0, Some(share(50, 35)), None)]
+    );
+    assert_eq!(m.surfaces.layout(NativeSurface::Tree).size, 35);
+    assert_eq!(m.surfaces.layout(NativeSurface::Agent).size, 35);
+    assert_eq!(m.ai_panel_width_pct, 35);
+}
+
+/// A size nvim clamps is answered by the width it settled on, and a width
+/// set in nvim after that is still kept. Waiting for the exact cells asked
+/// for left the sidebar deaf to every later width set in nvim.
+#[test]
+fn a_clamped_size_leaves_the_sidebar_listening_for_widths_set_in_nvim() {
+    use crate::native::geometry::{Anchor, NativeSurface};
+    let mut m = sidebars_open(&[(NativeSurface::Agent, Anchor::Right, 30)]);
+    let _ = update(&mut m, key("<S-Right>"));
+    assert!(m.surfaces.awaits_size(NativeSurface::Agent));
+    let _ = update(&mut m, right_sidebar_placed(AGENT_GRID, AGENT_WIN, 26));
+    assert!(!m.surfaces.awaits_size(NativeSurface::Agent));
+    assert_eq!(m.ai_panel_width_pct, 33);
+    let _ = update(&mut m, right_sidebar_placed(AGENT_GRID, AGENT_WIN, 40));
+    assert_eq!(m.ai_panel_width_pct, 50);
+}
+
 /// A sidebar on another tabpage when the grid changes size is sized where
 /// it stands: nvim hides its window and view keeps it, and nvim sets the
 /// width of a window on another tabpage.
@@ -19834,7 +19935,8 @@ fn arm_words(body: &str) -> Vec<String> {
 ///
 /// Read: the `feature == ".." && verb == ".."` conditions and the window
 /// verbs in `update/mod.rs`, `keys_invoke`'s two levels, `look::invoke`,
-/// `dvr::invoke` and the review's `VERBS`. The `to_tabpage_` verbs are
+/// `dvr::invoke`, the review's `VERBS` and the picker's sources in
+/// `picker_source_for_verb`. The `to_tabpage_` verbs are
 /// parsed off a prefix, so no literal names them.
 #[test]
 fn every_form_the_view_dispatch_answers_is_completed_and_in_the_usage() {
@@ -19881,6 +19983,19 @@ fn every_form_the_view_dispatch_answers_is_completed_and_in_the_usage() {
     }
     for verb in super::review::VERBS {
         add("review", verb, None);
+    }
+    let picker = source_between(
+        include_str!("surfaces.rs"),
+        "fn picker_source_for_verb",
+        "\n}\n",
+    );
+    let sources = arm_words(picker);
+    assert!(
+        sources.len() >= 3,
+        "the picker's sources moved: {sources:?}"
+    );
+    for verb in sources {
+        add("picker", &verb, None);
     }
     assert!(forms.len() > 20, "the walk read almost nothing: {forms:?}");
 

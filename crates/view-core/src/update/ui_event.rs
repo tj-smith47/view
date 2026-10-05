@@ -253,6 +253,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 );
             }
             model.dirty = true;
+            model.surfaces.flushed();
             // idempotent past the first Flush: view attaches after the
             // config has been sourced, so this one carries the settled
             // screen (see Model::takes_attach), and Model::chrome_painted

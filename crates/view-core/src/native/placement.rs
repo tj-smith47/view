@@ -56,10 +56,19 @@ pub struct SurfaceState {
     /// the replacement's `VimEnter` opens again.
     reopen: [bool; 4],
     /// The cells view last asked nvim to size each surface's window to,
-    /// until a placement of that window reports them. A placement reported
-    /// meanwhile predates the request, so its cells are no width the user
-    /// chose.
-    asked: [Option<u16>; 4],
+    /// and the count of nvim flushes from which a placement answers the
+    /// request, until a placement reports those cells or arrives in that
+    /// flush or a later one. A placement reported earlier predates the
+    /// request, so its cells are no width the user chose. A placement at
+    /// other cells from that flush on is the size nvim settled on, which
+    /// is how a request nvim clamps is answered.
+    asked: [Option<(u16, u64)>; 4],
+    /// The nvim flushes seen so far.
+    flushes: u64,
+    /// Whether a redraw batch has arrived since the last flush, so the
+    /// placements still to come in that flush were sent before any
+    /// request made now.
+    mid_flush: bool,
 }
 
 impl Default for SurfaceState {
@@ -74,6 +83,8 @@ impl Default for SurfaceState {
             pending: [false; 4],
             reopen: [false; 4],
             asked: [None; 4],
+            flushes: 0,
+            mid_flush: false,
         }
     }
 }
@@ -171,14 +182,27 @@ impl SurfaceState {
 
     /// Notes that view asked nvim to size `surface`'s window to `cells`.
     pub fn ask_size(&mut self, surface: NativeSurface, cells: u16) {
-        self.asked[surface.index()] = Some(cells);
+        let answered_from = self.flushes + u64::from(self.mid_flush);
+        self.asked[surface.index()] = Some((cells, answered_from));
+    }
+
+    /// Notes that a redraw batch from nvim has begun arriving.
+    pub fn redraw_began(&mut self) {
+        self.mid_flush = true;
+    }
+
+    /// Notes the end of one nvim flush.
+    pub fn flushed(&mut self) {
+        self.flushes = self.flushes.wrapping_add(1);
+        self.mid_flush = false;
     }
 
     /// Notes a placement of `surface`'s window at `cells`, which answers
-    /// the request for that size.
+    /// the request for that size, or any request made before this flush.
     pub fn placed_at(&mut self, surface: NativeSurface, cells: u16) {
+        let flushes = self.flushes;
         let asked = &mut self.asked[surface.index()];
-        if *asked == Some(cells) {
+        if asked.is_some_and(|(want, from)| want == cells || flushes >= from) {
             *asked = None;
         }
     }

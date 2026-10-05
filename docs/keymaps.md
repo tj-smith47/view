@@ -988,10 +988,10 @@ Forms with no default key:
 | form | does |
 | --- | --- |
 | `:View ai open` | opens the agent panel and puts your keys in it |
-| `:View ai focus` | the same; the name reads better when the panel is already open |
+| `:View ai focus` | the same as `:View ai open` |
 | `:View ai close` | closes the agent panel; the agent session keeps running |
 | `:View ai dismiss` | takes down the agent's crash banner |
 | `:View ui panes` | says which panes look is on, and whose the top row is |
 | `:View ui panes tiles` | gives every window a frame of its own |
 | `:View ui panes nvim` | keeps the shape nvim draws, with its separator column |
-| `:View ui panes auto` | goes back to the look your config gives |
+| `:View ui panes auto` | uses the look view picks for this terminal, as `panes = "auto"` does |

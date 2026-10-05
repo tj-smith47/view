@@ -95,12 +95,7 @@ pub(super) fn reshare_windowed_sidebars(model: &mut Model, before: (u16, u16)) -
         if !model.surfaces.windowed(surface) || from == to || sized.contains(&layout.anchor) {
             continue;
         }
-        let Some(win) = model.engine.grids().native_window(surface) else {
-            continue;
-        };
-        keep_size_set_in_nvim(model, surface, win, from);
-        let size = model.surfaces.layout(surface).size;
-        if let Some(call) = super::surfaces::window_size_call(model, surface, size) {
+        if let Some(call) = super::surfaces::window_size_call(model, surface, layout.size) {
             sized.push(layout.anchor);
             effects.push(call);
         }
@@ -108,27 +103,15 @@ pub(super) fn reshare_windowed_sidebars(model: &mut Model, before: (u16, u16)) -
     effects
 }
 
-/// Takes the cells `surface`'s window stands at as its share of `extent`,
-/// the grid's size along its axis that those cells were laid out in, where
-/// they are not the cells its share gives. Only nvim's side sizes a window
-/// to other cells (`:vertical resize`, `<C-w>|`, a plugin), and a size
-/// view asked for and has not seen reported yet is skipped.
-fn keep_size_set_in_nvim(
-    model: &mut Model,
-    surface: NativeSurface,
-    win: crate::events::WinHandle,
-    extent: u16,
-) {
+/// Takes `cells`, where `surface`'s window stands along its axis, as its
+/// share of `extent`, the grid's size along that axis, where they are not
+/// the cells its share gives. Only nvim's side sizes a window to other
+/// cells (`:vertical resize`, `<C-w>|`, a plugin), and a size view asked
+/// for and has not seen answered yet is skipped.
+fn keep_size_set_in_nvim(model: &mut Model, surface: NativeSurface, cells: u16, extent: u16) {
     let layout = model.surfaces.layout(surface);
-    let Some((_, _, width, height)) = model.engine.grids().window_slot(win) else {
-        return;
-    };
-    let cells = if crate::msg::WinSplit::for_anchor(layout.anchor).is_vertical() {
-        width
-    } else {
-        height
-    };
     if extent == 0
+        || surface == NativeSurface::Palette
         || model.surfaces.awaits_size(surface)
         || cells == crate::native::geometry::share(extent, layout.size).max(1)
     {
@@ -155,7 +138,8 @@ fn keep_size_set_in_nvim(
 }
 
 /// Notes the cells a placement of `grid`'s window reports, which answer a
-/// size view asked for when they are those cells.
+/// size view asked for, and keeps them as the sidebar's share when nvim's
+/// side set them.
 pub(super) fn note_sidebar_placed(model: &mut Model, grid: crate::grid::registry::GridId) {
     let Some(surface) = model.engine.grids().native_surface(grid) else {
         return;
@@ -167,10 +151,14 @@ pub(super) fn note_sidebar_placed(model: &mut Model, grid: crate::grid::registry
         .grids()
         .native_window(surface)
         .and_then(|win| model.engine.grids().window_slot(win));
-    if let Some((_, _, width, height)) = slot {
-        model
-            .surfaces
-            .placed_at(surface, if vertical { width } else { height });
+    let Some((_, _, width, height)) = slot else {
+        return;
+    };
+    let cells = if vertical { width } else { height };
+    model.surfaces.placed_at(surface, cells);
+    if model.surfaces.windowed(surface) {
+        let (columns, rows) = model.engine.grids().global().size();
+        keep_size_set_in_nvim(model, surface, cells, if vertical { columns } else { rows });
     }
 }
 

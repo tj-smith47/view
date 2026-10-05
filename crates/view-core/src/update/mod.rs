@@ -454,6 +454,9 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Redraw(events) => {
             let flushed = matches!(events.last(), Some(crate::events::UiEvent::Flush));
             let mut effects = Vec::new();
+            if !events.is_empty() {
+                model.surfaces.redraw_began();
+            }
             for ev in events {
                 effects.extend(apply_ui_event(model, ev));
             }
