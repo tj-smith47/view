@@ -97,6 +97,10 @@ as they are by default.
 
 ![the hang banner, then the same buffer back after a restart](assets/tapes/engine-restart.gif)
 
+**Rewind the session.** Turn it on with `[dvr] enabled = true`, then
+`<leader>fv` scrubs back through what the screen showed. Branch the editor
+from any moment, export a clip, and play it back.
+
 **Fast where you feel it.** Launch, keypress and scroll are measured with
 your config loaded. See [Performance](#performance).
 
@@ -155,8 +159,6 @@ view brings together ideas from across the open-source community:
 
 ### Next
 
-- **Rewind the session.** Scrub back through everything you typed and
-  saw, branch from any point, export a clip.
 - **Image viewing.** Open an image in a pane, or preview one from the
   picker or the tree. Sharp on terminals that can show pictures, blocky
   elsewhere.
