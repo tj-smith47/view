@@ -249,7 +249,7 @@ fn publish(
 ) -> io::Result<()> {
     match link(part, path) {
         Ok(()) => {}
-        Err(e) if lacks_the_operation(&e) => rename_noreplace(part, path)?,
+        Err(e) if link_unavailable(&e) => rename_noreplace(part, path)?,
         Err(e) => return Err(e),
     }
     // a power loss can otherwise take the new name back
@@ -257,6 +257,17 @@ fn publish(
         let _ = File::open(dir).and_then(|d| d.sync_all());
     }
     Ok(())
+}
+
+/// Whether a failed hard link leaves the rename as the way to publish:
+/// [`lacks_the_operation`], or on unix EACCES, which Android and SELinux
+/// policies answer for `link` while allowing `rename`.
+fn link_unavailable(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    let policy = e.raw_os_error() == Some(libc::EACCES);
+    #[cfg(not(unix))]
+    let policy = false;
+    policy || lacks_the_operation(e)
 }
 
 /// Whether a failed hard link, symlink or named pipe says the filesystem
@@ -696,6 +707,26 @@ mod tests {
 
     /// A link refused for want of the operation is told from every other
     /// failure by the raw code each host answers with.
+    #[test]
+    fn a_policy_denied_link_still_publishes_by_rename() {
+        #[cfg(unix)]
+        {
+            let denied = io::Error::from_raw_os_error(libc::EACCES);
+            assert!(link_unavailable(&denied));
+            assert!(!lacks_the_operation(&denied));
+            for code in [libc::ENOTSUP, libc::EPERM] {
+                let e = io::Error::from_raw_os_error(code);
+                assert!(link_unavailable(&e), "{code}");
+            }
+            for code in [libc::ENOSPC, libc::EROFS, libc::ENOENT] {
+                let e = io::Error::from_raw_os_error(code);
+                assert!(!link_unavailable(&e), "{code}");
+            }
+        }
+        let full = io::Error::from(io::ErrorKind::StorageFull);
+        assert!(!link_unavailable(&full));
+    }
+
     #[test]
     fn a_filesystem_without_hard_links_is_told_by_its_raw_error() {
         #[cfg(unix)]
