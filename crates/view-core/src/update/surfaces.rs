@@ -1494,6 +1494,10 @@ pub(crate) const HISTORY_KEYS: &[(&str, &str)] = &[
         "d",
         "take down the standing notice the selected entry belongs to",
     ),
+    (
+        "<Esc>",
+        "close the history; in a window of its own, go back to the window you came from",
+    ),
 ];
 
 /// One keypress aimed at the open message-history overlay.

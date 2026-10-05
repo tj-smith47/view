@@ -40,6 +40,10 @@ The table below is generated from `default_maps()` in
 | `<leader>fk` | `keys` | `:View keys log` |
 | `<leader>fv` | `dvr` | `:View dvr scrub` |
 
+`<leader>fp` holds the notices on screen: none leaves on its own until you
+press it again, and the top notice carries a mark while they are held. New
+notices still arrive, and `<leader>fd` still takes the newest one down.
+
 ## `<leader>ai` reads the panel before it acts
 
 The AI panel is non-modal: `<Esc>` steps out of it and leaves it on screen
@@ -80,6 +84,21 @@ and the next `<leader>e` opens a fresh tree beside it.
 `<Esc>` inside the tree takes you back to the window you came from and
 leaves the tree standing. Under the default `placement = "overlay"` the
 tree draws over your buffers instead, and `<Esc>` closes it.
+
+Inside the tree:
+
+| key | does |
+| --- | --- |
+| `<Down>`, `<Up>` | move the selection |
+| `<CR>` on a directory | opens or closes it |
+| `<CR>` on a file | opens the file; a floating tree closes, and a windowed tree stays while the file opens in the window you came from |
+| `a` | asks for a name and creates that file in the selected directory, beside the selected file, or at the tree's root when nothing is selected |
+| `r` | asks for a new name for the selected file |
+| `d` | asks before it deletes the selected file |
+| `<Esc>` | as above |
+
+`r` and `d` do nothing on a directory. The resize keys under
+[Resizing the sidebars](#resizing-the-sidebars) work here too.
 
 ## Your own keys reach nvim under nvim's names
 
@@ -429,8 +448,14 @@ notifications are on. Two entries that swap keys both take effect.
 When two entries move onto one free key, one keeps it and the other stays
 on its default, and view names both.
 
-`<c-g>` and `<C-g>` are one key, as are `<M-x>` and `<A-x>`. A key typed in
-a buffer and a key typed on one of view's own panels can share a spelling.
+`<c-g>` and `<C-g>` are one key, as are `<M-x>` and `<A-x>`, `<M-CR>` and
+`<M-Enter>`, and `<leader>fv` and `<Space>fv` when your leader is space.
+`<C-S-a>` and `<C-a>` are two keys. A key typed in a buffer and a key typed
+on one of view's own panels can share a spelling.
+
+`view --print-caps` runs before your nvim config sets the leader, so it
+compares a key written with `<leader>` only against other keys written with
+`<leader>`. The session checks it against your leader.
 
 ## Answering an agent's permission request
 
@@ -486,6 +511,24 @@ That form is also the way in when `<leader>h` is already yours, and the way
 out of a review whose buffer view can no longer write to at all.
 
 See [ai.md](ai.md) for what a review is and what each decision writes.
+
+## Keys in the agent panel
+
+While the agent panel has your keys, what you type goes to the composer,
+and these keys act on the panel:
+
+| key | does |
+| --- | --- |
+| `<CR>` | sends the prompt, once the agent has finished its turn |
+| `<BS>` | deletes the last character of the prompt |
+| `<C-c>` | cancels the agent's turn while it is running |
+| `<PageUp>`, `<PageDown>` | scroll the transcript a page |
+| `<C-u>`, `<C-d>` | scroll the transcript half a page |
+| `<C-d>` with the crash banner up | takes the banner down |
+| `<Esc>` | gives your keys back to the editor and leaves the panel open |
+
+A prompt you are writing stays on the composer line while the transcript
+scrolls.
 
 ## Writing a prompt of more than one line
 
@@ -688,13 +731,24 @@ toggle_gaps = "<leader>ug"     # the default
 cycle_surfaces = "<leader>uw"  # the default
 ```
 
+## When the editor stops answering
+
+When the editor stops answering keys, a banner offers these:
+
+| key | does |
+| --- | --- |
+| `<C-c>` | interrupts what the editor is doing and keeps it running |
+| `<F5>` | restarts the editor, recovering what its swap files held |
+| `<Esc>` | closes the banner and leaves the editor as it is |
+| `<C-q>` | quits view, offered once the editor's connection has closed |
+
 ## Dismissing an error
 
 An error or warning is sticky: it stays on screen until you have read it,
 where an ordinary message fades on its own. Motions, insert mode and idle
 time all leave it standing.
 
-`<Esc>` in normal mode takes it down:
+`<Esc>` in the editor takes it down, in any mode:
 
 ```vim
 :bogus
@@ -704,9 +758,10 @@ time all leave it standing.
 
 Nothing else changes: the key still reaches nvim exactly as it always did,
 so a pending count or operator is cancelled the same way, and `<Esc>` with
-no error showing does nothing new at all. In insert, visual or
-operator-pending mode `<Esc>` only leaves the mode. Press it again from
-normal mode to clear the error.
+no error showing does nothing new at all. An `<Esc>` that leaves insert or
+visual mode takes the error down with it, and its text stays in the history.
+While the banner for an editor that stopped answering is up, `<Esc>`
+answers the banner and the error stays.
 
 Dismissing takes the toast off the screen and keeps the record. Every
 message view has shown, errors included, stays in the history:
@@ -737,8 +792,7 @@ and scrolls:
 | `G` | select the oldest entry |
 | `y` | copy the selected entry verbatim, to the system clipboard and over OSC 52 |
 | `d` | take down the standing notice the selected entry belongs to |
-
-`<Esc>` closes it.
+| `<Esc>` | close the history; in a window of its own, go back to the window you came from |
 
 `y` copies the selected line byte for byte. A path with a space in it arrives
 with the space. It goes to your system clipboard and, in the same keystroke, out
@@ -793,9 +847,9 @@ These keys then work on the log:
 | `gg` | select the newest mapping |
 | `G` | select the oldest mapping |
 | `y` | copy the selected row, to the system clipboard and over OSC 52 |
+| `<Esc>` | close the log |
 
-While the log has your keys, `<Esc>` closes it. The log keeps the newest
-200 mappings.
+The log keeps the newest 200 mappings.
 
 A mapping of yours is logged when you fire it in normal mode, in any
 window. A mapping set on the current buffer alone, such as one a language
@@ -837,7 +891,8 @@ to the bar, ahead of the keys. These keys move through the frames:
 | `L` | one second forward |
 | `g` | the oldest frame kept |
 | `G` | the newest frame |
-| `q` | back to the live screen, as `<Esc>` does |
+| `q` | back to the live screen |
+| `<Esc>` | back to the live screen |
 | `b` | the editor replaced by one brought to this frame, after a confirm |
 | `e` | the recording written to a clip file, then live |
 
@@ -899,4 +954,19 @@ always reachable even with no keys at all:
 :View tree toggle
 ```
 
-It completes both arguments against every entry point this build has.
+It completes each word against every form this build answers, and a third
+word where a form takes one: `:View ui panes <Tab>` offers `auto`, `nvim`
+and `tiles`.
+
+Forms with no default key:
+
+| form | does |
+| --- | --- |
+| `:View ai open` | opens the agent panel and puts your keys in it |
+| `:View ai focus` | the same; the name reads better when the panel is already open |
+| `:View ai close` | closes the agent panel; the agent session keeps running |
+| `:View ai dismiss` | takes down the agent's crash banner |
+| `:View ui panes` | says which panes look is on, and whose the top row is |
+| `:View ui panes tiles` | gives every window a frame of its own |
+| `:View ui panes nvim` | keeps the shape nvim draws, with its separator column |
+| `:View ui panes auto` | goes back to the look your config gives |

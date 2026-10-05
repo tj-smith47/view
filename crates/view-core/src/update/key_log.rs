@@ -23,6 +23,7 @@ pub(crate) const KEY_LOG_KEYS: &[(&str, &str)] = &[
         "y",
         "copy the selected row, to the system clipboard and over OSC 52",
     ),
+    ("<Esc>", "close the log"),
 ];
 
 /// Opens the key log, or closes it when open.

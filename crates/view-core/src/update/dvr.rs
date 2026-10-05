@@ -23,14 +23,15 @@ const PLAY_NO_PATH: &str = "view: DVR play needs a clip: :View dvr play PATH";
 /// carries the rendered table. Test-only: the scrub matches on the keys
 /// themselves.
 #[cfg(test)]
-pub(crate) const DVR_KEYS: [(&str, &str); 9] = [
+pub(crate) const DVR_KEYS: [(&str, &str); 10] = [
     ("h", "one frame back"),
     ("l", "one frame forward"),
     ("H", "one second back"),
     ("L", "one second forward"),
     ("g", "the oldest frame kept"),
     ("G", "the newest frame"),
-    ("q", "back to the live screen, as `<Esc>` does"),
+    ("q", "back to the live screen"),
+    ("<Esc>", "back to the live screen"),
     (
         "b",
         "the editor replaced by one brought to this frame, after a confirm",
@@ -378,7 +379,7 @@ mod tests {
 
     #[test]
     fn every_scrub_key_moves_or_closes_and_no_other_key_does() {
-        for (notation, _) in DVR_KEYS.iter().chain(&[("<Esc>", "")]) {
+        for (notation, _) in DVR_KEYS {
             let mut m = recorded();
             let _ = update(&mut m, invoke_msg("scrub"));
             assert_eq!(m.dvr.take_step(), Some(ScrubStep::Newest));

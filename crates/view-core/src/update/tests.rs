@@ -11897,6 +11897,14 @@ fn history_view(model: &Model) -> crate::native::views::PaletteView {
     }
 }
 
+/// The open history overlay's selection, or `None` once a key closed it.
+fn history_selected(model: &Model) -> Option<usize> {
+    match model.overlays().last().map(|o| &o.kind) {
+        Some(OverlayKind::MessageHistory(state)) => state.view(model.utc_offset_secs()).selected,
+        _ => None,
+    }
+}
+
 /// The item rows the open overlay's frame can actually show, by the same
 /// arithmetic `view_surface::overlay` paints it with.
 fn history_item_rows(model: &Model) -> usize {
@@ -12050,7 +12058,7 @@ fn every_documented_history_key_answers_a_real_keystroke() {
             effects = press(&mut m, notation);
         }
 
-        let after = history_view(&m).selected;
+        let after = history_selected(&m);
         assert!(
             before != after || !effects.is_empty() || m.dirty,
             "`{key}` ({what}) is documented but does nothing when pressed as the \
@@ -18752,7 +18760,7 @@ fn every_history_key_works_inside_the_windowed_stream() {
             effects = press(&mut m, notation);
         }
 
-        let after = history_view(&m).selected;
+        let after = history_selected(&m);
         assert!(
             before != after || !effects.is_empty() || m.dirty,
             "`{key}` ({what}) is documented but does nothing when pressed \
