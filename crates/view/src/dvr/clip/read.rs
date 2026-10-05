@@ -24,6 +24,8 @@ pub(crate) struct Clip {
     pub(crate) dead: Vec<RangeInclusive<u64>>,
     /// The frames the ring could not hold, with the deltas built on them.
     pub(crate) dropped: usize,
+    /// The oldest frames the ring let go of to hold the newer ones.
+    pub(crate) left_out: usize,
     /// The inputs past the input log's share of the recording bound, and
     /// those of a kind this build does not know.
     pub(crate) dropped_inputs: usize,
@@ -105,6 +107,7 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
         markers: Vec::new(),
         dead: Vec::new(),
         dropped: 0,
+        left_out: 0,
         dropped_inputs: 0,
     };
     let (mut frames, mut inputs_read, mut input_bytes) = (0u64, 0u64, 0usize);
@@ -173,6 +176,10 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
                     return Err(ClipError::Malformed("bytes follow the end record"));
                 }
                 clip.ring = builder.finish();
+                clip.left_out = usize::try_from(frames)
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(clip.dropped)
+                    .saturating_sub(clip.ring.frame_count());
                 return Ok(clip);
             }
             _ => {}

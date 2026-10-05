@@ -60,6 +60,8 @@ pub enum DvrIoReply {
     ClipLoaded {
         /// The clip's file.
         path: String,
+        /// The clip's oldest frames, left out to fit `[dvr] max_mb`.
+        left_out: usize,
     },
     /// A file operation failed.
     Failed {
@@ -92,7 +94,10 @@ impl DvrIoReply {
     #[must_use]
     pub fn notice(&self) -> Option<String> {
         Some(match self {
-            Self::DiskChecked { .. } | Self::ClipLoaded { .. } => return None,
+            Self::DiskChecked { .. } | Self::ClipLoaded { left_out: 0, .. } => return None,
+            Self::ClipLoaded { path, left_out } => format!(
+                "view: DVR clip {path}: {left_out} oldest frames past [dvr] max_mb were not loaded"
+            ),
             Self::Exported { path, cut: 0 } => format!("view: DVR clip written: {path}"),
             Self::Exported { path, cut } => format!(
                 "view: DVR clip written: {path} ({cut} symbols cut to {CLIP_FIELD_MAX} bytes)"
@@ -255,6 +260,8 @@ pub struct Dvr {
     clip: Option<String>,
     /// A clip opened that the loop has not shown yet.
     clip_opened: bool,
+    /// The clip being read, until its frames or its failure arrive.
+    loading: Option<String>,
 }
 
 impl Dvr {
@@ -355,6 +362,18 @@ impl Dvr {
         self.pending_moves.push_back(ScrubStep::Newest);
         self.clip = Some(path);
         self.clip_opened = true;
+        self.loading = None;
+    }
+
+    /// The clip being read, `None` when no read is in flight.
+    #[must_use]
+    pub(crate) fn loading(&self) -> Option<&str> {
+        self.loading.as_deref()
+    }
+
+    /// Ends the read in flight, which failed.
+    pub(crate) fn end_load(&mut self) {
+        self.loading = None;
     }
 
     /// The file of the clip the scrub shows, `None` while it shows the
@@ -369,15 +388,22 @@ impl Dvr {
         std::mem::take(&mut self.clip_opened)
     }
 
-    /// Queues a read of the clip at `path`.
+    /// Queues a read of the clip at `path`, which is loading until
+    /// [`Self::open_clip`] or [`Self::end_load`].
     pub(crate) fn request_play(&mut self, path: String) {
+        self.loading = Some(path.clone());
         self.requests.push_back(DvrRequest::Play(path));
     }
 
     /// Marks the newest frame as the one the DVR verb `word` ran on.
     pub(crate) fn mark_invoke(&mut self, word: &str) {
-        if self.recording {
-            self.markers.push((self.last_frame, Marker::Invoke));
+        if !self.recording {
+            return;
+        }
+        self.markers.push((self.last_frame, Marker::Invoke));
+        // a replay ends where the log filled, so a verb past that point is
+        // never replayed and owes nothing
+        if self.overflowed_at.is_none() {
             self.history.push((
                 self.entries.len(),
                 self.last_frame,

@@ -132,6 +132,12 @@ impl FrameRing {
             .saturating_add(self.copied.load(Ordering::Relaxed))
     }
 
+    /// How many frames the ring holds.
+    #[must_use]
+    pub fn frame_count(&self) -> usize {
+        self.groups.iter().map(|group| group.frames.len()).sum()
+    }
+
     /// The newest recorded frame.
     #[must_use]
     pub fn newest(&self) -> Option<u64> {

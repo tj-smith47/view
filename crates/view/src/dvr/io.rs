@@ -110,13 +110,14 @@ impl Io {
             IoJob::DiskCheck => self.disk_check(),
             IoJob::Export(export) => write(export),
             IoJob::Play { path, max_bytes } => match read_clip(&path, max_bytes) {
-                Ok(ring) => {
+                Ok((ring, left_out)) => {
                     // a loop that has quit takes no frames and no reply
                     if self.clips.send(ring).is_err() {
                         return;
                     }
                     DvrIoReply::ClipLoaded {
                         path: path.display().to_string(),
+                        left_out,
                     }
                 }
                 Err(reason) => DvrIoReply::Failed {
@@ -150,16 +151,19 @@ impl Io {
 }
 
 /// The frames of the clip at `path`, read into a ring holding a recording
-/// bound of `max_bytes`, or why they could not be, naming the path.
-fn read_clip(path: &Path, max_bytes: usize) -> Result<FrameRing, String> {
+/// bound of `max_bytes`, with how many of its oldest frames that bound left
+/// out, or why they could not be read, naming the path.
+fn read_clip(path: &Path, max_bytes: usize) -> Result<(FrameRing, usize), String> {
     let shown = path.display();
-    let file = File::open(path).map_err(|e| format!("{shown}: {e}"))?;
+    let file = view_native::picker::preview::open_regular_file(path)
+        .map_err(|e| format!("{shown}: {e}"))?;
     let clip = clip::read::decode(&mut io::BufReader::new(file), max_bytes)
         .map_err(|e| format!("{shown}: {e}"))?;
     crate::vlog::log_with("dvr", || {
         format!(
-            "play {shown} dropped={} inputs={} dropped_inputs={} marks={} dead={}",
+            "play {shown} dropped={} left_out={} inputs={} dropped_inputs={} marks={} dead={}",
             clip.dropped,
+            clip.left_out,
             clip.inputs.len(),
             clip.dropped_inputs,
             clip.markers.len(),
@@ -169,7 +173,7 @@ fn read_clip(path: &Path, max_bytes: usize) -> Result<FrameRing, String> {
     if clip.ring.newest().is_none() {
         return Err(format!("{shown}: the clip holds no frame"));
     }
-    Ok(clip.ring)
+    Ok((clip.ring, clip.left_out))
 }
 
 /// The FNV-1a hash of the file at `path`, read in pieces. `None` when it

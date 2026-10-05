@@ -864,9 +864,14 @@ not is removed, and view says so as it exits.
 
 `:View dvr play PATH` opens a clip in the scrub, with PATH read as the
 export path is. The bar starts with `CLIP` and the clip's file name. The
-frame keys move through the clip, and `q` returns to the live screen. `b`
-and `e` are not available in a clip. The session goes on recording while a
-clip is open, and the clip holds up to `[dvr] max_mb` of memory of its own.
+frame keys move through the clip, and `q` returns to the live screen.
+Pressing `b` or `e` in a clip closes it with a notice. Your recording is
+kept while a clip is open. The screen is not recorded until the clip is
+closed. A clip holds up to `[dvr] max_mb` of memory beside your recording.
+A clip longer than that is loaded from its newest frame, and a notice says
+how many of its oldest frames were left out. Playing a clip closes the one
+open, and a play while a clip is still being read is refused with a notice
+naming that clip.
 
 Every other key, paste and click is dropped while the scrub is open, so
 nothing reaches your buffer. Closing it redraws the live screen. How far

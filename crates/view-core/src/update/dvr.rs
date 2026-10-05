@@ -67,12 +67,22 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
     }
 }
 
-/// Queues a read of the clip at `path`, which opens in the scrub once read.
+/// Queues a read of the clip at `path`, which opens in the scrub once read,
+/// closing the clip shown. Refused while another clip is being read.
 fn play(model: &mut Model, path: &str) -> Vec<Effect> {
     if path.is_empty() {
         return model
             .engine
             .record_native_notice(PLAY_NO_PATH.to_owned(), false);
+    }
+    if let Some(loading) = model.dvr.loading() {
+        let text = format!("view: DVR play busy: {loading} is still being read");
+        return model.engine.record_native_notice(text, false);
+    }
+    // the loop frees the shown clip before the next read starts, so the
+    // recording and one clip are the most it holds
+    if model.dvr.clip().is_some() {
+        model.dvr.close_scrub();
     }
     model.dvr.request_play(path.to_owned());
     Vec::new()
@@ -134,10 +144,13 @@ fn branch(model: &mut Model, at: u64) -> Vec<Effect> {
 /// Raises the confirm a pending branch waits on, or the notice a reply
 /// from the DVR's file work carries.
 pub(super) fn on_io(model: &mut Model, reply: &DvrIoReply) -> Vec<Effect> {
-    if let DvrIoReply::ClipLoaded { path } = reply {
-        model.dvr.open_clip(path.clone());
-        model.dirty = true;
-        return Vec::new();
+    match reply {
+        DvrIoReply::ClipLoaded { path, .. } => {
+            model.dvr.open_clip(path.clone());
+            model.dirty = true;
+        }
+        DvrIoReply::Failed { verb: "play", .. } => model.dvr.end_load(),
+        _ => {}
     }
     if let DvrIoReply::DiskChecked {
         changed,
@@ -384,15 +397,6 @@ mod tests {
                 "the bar names {k}, which the scrub does not answer"
             );
         }
-    }
-
-    #[test]
-    fn a_clip_bar_names_the_scrub_keys_but_branch_and_export() {
-        let hint = crate::native::dvr::CLIP_HINT;
-        assert_eq!(
-            Some(hint),
-            crate::native::dvr::SCRUB_HINT.strip_suffix("  b branch  e export")
-        );
     }
 
     fn exports(m: &mut Model) -> Vec<Option<String>> {
@@ -766,7 +770,92 @@ mod tests {
     fn loaded(path: &str) -> Msg {
         Msg::DvrIo(DvrIoReply::ClipLoaded {
             path: path.to_owned(),
+            left_out: 0,
         })
+    }
+
+    fn plays(m: &mut Model) -> Vec<String> {
+        std::iter::from_fn(|| m.dvr.take_request())
+            .filter_map(|r| match r {
+                DvrRequest::Play(path) => Some(path),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_play_while_a_clip_loads_is_refused_naming_it() {
+        let mut m = recorded();
+        let _ = update(&mut m, invoke_msg("play /w/a.vdvr"));
+        let _ = update(&mut m, invoke_msg("play /w/b.vdvr"));
+        assert_eq!(plays(&mut m), ["/w/a.vdvr"], "one clip is read at a time");
+        assert!(
+            told_once(&m, "view: DVR play busy: /w/a.vdvr is still being read"),
+            "{:?}",
+            m.engine.messages.entries
+        );
+        let _ = update(&mut m, loaded("/w/a.vdvr"));
+        let _ = update(&mut m, invoke_msg("play /w/c.vdvr"));
+        assert_eq!(plays(&mut m), ["/w/c.vdvr"], "a loaded clip ends the load");
+        let failed = DvrIoReply::Failed {
+            verb: "play",
+            reason: "/w/c.vdvr: not a file".to_owned(),
+        };
+        let _ = update(&mut m, Msg::DvrIo(failed));
+        let _ = update(&mut m, invoke_msg("play /w/d.vdvr"));
+        assert_eq!(plays(&mut m), ["/w/d.vdvr"], "a failed read ends the load");
+    }
+
+    #[test]
+    fn a_play_closes_the_clip_open_before_it_queues() {
+        let mut m = recorded();
+        let _ = update(&mut m, loaded("/w/a.vdvr"));
+        let _ = update(&mut m, invoke_msg("play /w/b.vdvr"));
+        assert!(m.dvr.clip().is_none(), "the open clip is closed first");
+        assert_eq!(plays(&mut m), ["/w/b.vdvr"]);
+    }
+
+    #[test]
+    fn a_clip_cut_to_fit_says_how_many_oldest_frames_were_left_out() {
+        let mut m = recorded();
+        let cut = DvrIoReply::ClipLoaded {
+            path: "/w/a.vdvr".to_owned(),
+            left_out: 40,
+        };
+        let _ = update(&mut m, Msg::DvrIo(cut));
+        assert_eq!(m.dvr.clip(), Some("/w/a.vdvr"));
+        assert!(
+            told_once(
+                &m,
+                "view: DVR clip /w/a.vdvr: 40 oldest frames past [dvr] max_mb \
+                 were not loaded"
+            ),
+            "{:?}",
+            m.engine.messages.entries
+        );
+        let mut whole = recorded();
+        let _ = update(&mut whole, loaded("/w/a.vdvr"));
+        assert!(!format!("{:?}", whole.engine.messages.entries).contains("not loaded"));
+    }
+
+    #[test]
+    fn a_verb_run_after_the_input_log_filled_is_never_owed_to_a_branch() {
+        let mut m = recorded();
+        let _ = update(&mut m, key("x"));
+        m.dvr.note_frame(10, 2);
+        // the input that fills the log is the first after frame 10, so
+        // every logged input comes before it
+        let _ = update(&mut m, Msg::Paste("p".repeat(4 << 20)));
+        assert_eq!(m.dvr.overflowed_at(), Some(10));
+        m.dvr.note_frame(12, 2);
+        let _ = update(&mut m, invoke_msg("scrub"));
+        let _ = update(&mut m, key("q"));
+        branched(&mut m, 10, 12);
+        let _ = update(&mut m, invoke_msg("scrub"));
+        assert!(
+            m.dvr.scrub_frame().is_some(),
+            "the first scrub asked for after the branch opens"
+        );
     }
 
     #[test]

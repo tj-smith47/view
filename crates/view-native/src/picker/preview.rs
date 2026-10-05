@@ -11,6 +11,43 @@ use std::path::Path;
 
 use view_core::native::picker::PREVIEW_LINE_BYTES;
 
+/// Opens `path` for reading when it names a regular file. A named pipe or a
+/// device is never opened, and a path swapped for one between the check and
+/// the open cannot block the open.
+///
+/// # Errors
+///
+/// Returns the error the check or the open failed with, or an
+/// [`std::io::ErrorKind::InvalidInput`] error reading `not a file` for a
+/// path that names no regular file.
+pub fn open_regular_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let not_a_file = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file");
+    // opening a named pipe completes the open of a writer waiting on it, and
+    // opening a device runs its driver, so neither is opened at all
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(not_a_file());
+    }
+    // a path swapped for a pipe or a device after the check above would
+    // block a plain open with no end; O_NONBLOCK has no effect on reading a
+    // regular file, and O_NOCTTY keeps a swapped-in tty from becoming the
+    // controlling terminal
+    #[cfg(unix)]
+    let file = std::fs::File::from(rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::NOCTTY
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?);
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(not_a_file());
+    }
+    Ok(file)
+}
+
 /// Reads `count` lines of `path` from the 1-based line `first` on, fewer
 /// where the file ends first, or `None` for a path that does not exist or
 /// cannot be read, for a path that is no regular file (a named pipe, a
@@ -34,33 +71,7 @@ pub fn read_window(
     count: u64,
     superseded: impl Fn() -> bool,
 ) -> Option<Vec<String>> {
-    // opening a named pipe completes the open of a writer waiting on it, and
-    // opening a device runs its driver, so neither is opened at all
-    if !std::fs::metadata(path).ok()?.is_file() {
-        return None;
-    }
-    // a path swapped for a pipe or a device after the check above would
-    // block a plain open with no end, before `superseded` is ever asked;
-    // O_NONBLOCK has no effect on reading a regular file, and O_NOCTTY
-    // keeps a swapped-in tty from becoming the controlling terminal
-    #[cfg(unix)]
-    let file = std::fs::File::from(
-        rustix::fs::open(
-            path,
-            rustix::fs::OFlags::RDONLY
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::NOCTTY
-                | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .ok()?,
-    );
-    #[cfg(not(unix))]
-    let file = std::fs::File::open(path).ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
-    }
-    let mut reader = std::io::BufReader::new(file);
+    let mut reader = std::io::BufReader::new(open_regular_file(path).ok()?);
     let mut to_skip = first.saturating_sub(1);
     while to_skip > 0 {
         if superseded() {

@@ -191,12 +191,9 @@ impl DvrLoop {
     fn swap_clip(&mut self, model: &mut Model) {
         if model.dvr.take_opened_clip() {
             if let Ok(clip) = self.clips.try_recv() {
-                // a clip closed before this pass is dropped unshown
-                if model.dvr.clip().is_some() {
-                    let shown = std::mem::replace(&mut self.ring, clip);
-                    self.live.get_or_insert(shown);
-                    self.painted = None;
-                }
+                let shown = std::mem::replace(&mut self.ring, clip);
+                self.live.get_or_insert(shown);
+                self.painted = None;
             }
         }
         if model.dvr.clip().is_none() {
@@ -1114,6 +1111,161 @@ mod tests {
         );
     }
 
+    /// Invokes `:View dvr TEXT` and polls the loop once.
+    fn verb(model: &mut Model, dvr: &mut DvrLoop, text: &str) {
+        let _ = update(
+            model,
+            Msg::FeatureInvoke {
+                generation: None,
+                feature: "dvr".to_owned(),
+                verb: text.to_owned(),
+            },
+        );
+        let _ = dvr.poll(model);
+    }
+
+    /// A play asked for while a clip is being read is refused by name, and
+    /// the file thread reads one clip.
+    #[test]
+    fn a_second_play_while_one_loads_is_refused_and_one_read_runs() {
+        let _watchdog = view_test_support::watchdog();
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        let (read_tx, read) = std::sync::mpsc::channel();
+        let (gate, gate_rx) = std::sync::mpsc::channel::<()>();
+        let writer = BackgroundWriter::start("dvr-io-test", 1, move |job: IoJob| {
+            if let IoJob::Play { .. } = job {
+                let _ = read_tx.send(());
+                let _ = gate_rx.recv();
+            }
+            Ok::<(), Infallible>(())
+        })
+        .unwrap();
+        dvr.io = Some(writer);
+        verb(&mut model, &mut dvr, "play /w/a.vdvr");
+        read.recv().unwrap();
+        verb(&mut model, &mut dvr, "play /w/b.vdvr");
+        assert_eq!(
+            told(&model, "play busy: /w/a.vdvr is still being read"),
+            1,
+            "{:?}",
+            model.engine.messages.entries
+        );
+        drop(gate);
+        let mut io = dvr.io.take().unwrap();
+        assert_eq!(
+            io.finish_within(view_test_support::host_deadline(QUIT_WAIT)),
+            view_proc::writer::Finished::Done
+        );
+        assert_eq!(read.try_iter().count(), 0, "the second clip is never read");
+    }
+
+    /// Playing a clip while one is open brings the recording back before
+    /// the next clip is read, so the loop holds the recording and one clip.
+    #[test]
+    fn a_play_with_a_clip_open_brings_the_recording_back_first() {
+        let dir = view_test_support::ScratchDir::new("dvr-play-two").unwrap();
+        let (first, second) = (dir.join("a.vdvr"), dir.join("b.vdvr"));
+        write_clip(&first, 3);
+        write_clip(&second, 4);
+        let mut model = Model::with_term_size(80, 24);
+        let (mut dvr, rx) = wired(&mut model);
+        play(&mut model, &mut dvr, &rx, &first);
+        assert_eq!(dvr.ring.newest(), Some(3), "the first clip is shown");
+        verb(&mut model, &mut dvr, &format!("play {}", second.display()));
+        assert_eq!(
+            dvr.ring.newest(),
+            Some(6),
+            "the recording is back before the next clip is read"
+        );
+        assert!(dvr.live.is_none(), "the first clip's frames are freed");
+        let reply = rx
+            .recv_timeout(view_test_support::host_deadline(QUIT_WAIT))
+            .unwrap();
+        let _ = update(&mut model, reply);
+        let _ = dvr.poll(&mut model);
+        assert_eq!(dvr.ring.newest(), Some(4), "the second clip is shown");
+        assert_eq!(press(&mut model, &mut dvr, "q"), None);
+        assert_eq!(
+            dvr.ring.newest(),
+            Some(6),
+            "the recording parked under it is whole"
+        );
+    }
+
+    /// A named pipe is refused without being opened, so the file thread
+    /// goes on to the export queued behind it.
+    #[cfg(unix)]
+    #[test]
+    fn playing_a_named_pipe_is_refused_and_an_export_behind_it_completes() {
+        let _watchdog = view_test_support::watchdog();
+        let dir = view_test_support::ScratchDir::new("dvr-play-fifo").unwrap();
+        let fifo = dir.join("p.vdvr");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo {fifo:?} failed");
+        let mut model = Model::with_term_size(80, 24);
+        let (mut dvr, rx) = wired(&mut model);
+        verb(&mut model, &mut dvr, &format!("play {}", fifo.display()));
+        let clip = dir.join("after.vdvr");
+        export(&mut model, &mut dvr, &clip.display().to_string());
+        for _ in 0..2 {
+            let reply = rx
+                .recv_timeout(view_test_support::host_deadline(QUIT_WAIT))
+                .expect("the file thread answers the play and the export");
+            let _ = update(&mut model, reply);
+        }
+        let refused = format!("DVR play failed: {}: not a file", fifo.display());
+        assert_eq!(
+            told(&model, &refused),
+            1,
+            "{:?}",
+            model.engine.messages.entries
+        );
+        assert_eq!(told(&model, "DVR clip written"), 1);
+        assert!(clip.is_file());
+    }
+
+    #[test]
+    fn a_clip_longer_than_max_mb_holds_names_the_oldest_frames_left_out() {
+        let dir = view_test_support::ScratchDir::new("dvr-play-cut").unwrap();
+        let path = dir.join("long.vdvr");
+        write_clip(&path, 40);
+        let mut model = Model::with_term_size(80, 24);
+        let (mut dvr, rx) = wired(&mut model);
+        // room for a few one-frame groups of the forty
+        model.dvr.enable(clip_ring(1).held() * 4);
+        play(&mut model, &mut dvr, &rx, &path);
+        assert_eq!(dvr.ring.newest(), Some(40), "the newest end is kept");
+        let oldest = dvr.ring.oldest().unwrap();
+        assert!(oldest > 1, "the clip was cut, its oldest frame {oldest}");
+        let line = format!(
+            "long.vdvr: {} oldest frames past [dvr] max_mb were not loaded",
+            oldest - 1
+        );
+        assert_eq!(
+            told(&model, &line),
+            1,
+            "{:?}",
+            model.engine.messages.entries
+        );
+    }
+
+    #[test]
+    fn a_clip_bar_names_the_scrub_keys_but_branch_and_export() {
+        let mut model = Model::with_term_size(80, 24);
+        let dvr = recorded(&mut model);
+        assert_eq!(
+            dvr.bar(6, false, Some("/w/clips/a.vdvr")),
+            "CLIP a.vdvr  -0.0s of 2.0s  q close  h/l frame  H/L 1s  g/G ends"
+        );
+        assert!(dvr
+            .bar(6, false, None)
+            .ends_with("g/G ends  b branch  e export"));
+    }
+
     fn paint_live(model: &mut Model, term: &mut Term, dvr: &mut DvrLoop, row: u16) {
         model.engine.apply_grid(GridOp::PutLine {
             row,
@@ -1127,7 +1279,7 @@ mod tests {
     }
 
     #[test]
-    fn live_recording_continues_while_a_clip_is_open() {
+    fn the_recording_is_kept_whole_while_a_clip_is_open() {
         let mut model = Model::with_term_size(20, 6);
         model.engine.apply_grid(GridOp::Resize {
             width: 20,
@@ -1143,19 +1295,11 @@ mod tests {
         clips_tx.send(clip_ring(5)).unwrap();
         let loaded = DvrIoReply::ClipLoaded {
             path: "/w/a.vdvr".to_owned(),
+            left_out: 0,
         };
         let _ = update(&mut model, Msg::DvrIo(loaded));
         let _ = dvr.poll(&mut model);
         assert_eq!(model.dvr.scrub_frame(), Some(5));
-        let logged = model.dvr.inputs().count();
-        let _ = update(
-            &mut model,
-            Msg::Resized {
-                width: 20,
-                height: 6,
-            },
-        );
-        assert_eq!(model.dvr.inputs().count(), logged + 1, "input is logged");
         let _ = press(&mut model, &mut dvr, "q");
         assert_eq!(dvr.ring.newest(), Some(2), "the recording was kept whole");
         paint_live(&mut model, &mut term, &mut dvr, 2);
@@ -1164,16 +1308,11 @@ mod tests {
         assert_eq!(model.dvr.scrub_frame(), Some(3));
     }
 
-    /// A quit while a clip is being read waits for nothing, and the read
-    /// leaves no file behind.
+    /// A quit while a clip is being read waits for nothing.
     #[test]
-    fn a_quit_while_a_clip_loads_leaves_nothing_behind() {
+    fn a_quit_while_a_clip_loads_waits_for_nothing() {
         let _watchdog = view_test_support::watchdog();
-        let dir = view_test_support::ScratchDir::new("dvr-quit-play").unwrap();
-        let path = dir.join("a.vdvr");
-        write_clip(&path, 3);
         let mut model = Model::with_term_size(80, 24);
-        model.cwd = dir.path().to_path_buf();
         let mut dvr = recorded(&mut model);
         let (entered_tx, entered) = std::sync::mpsc::channel();
         let (gate, gate_rx) = std::sync::mpsc::channel::<()>();
@@ -1186,23 +1325,10 @@ mod tests {
         })
         .unwrap();
         dvr.io = Some(writer);
-        let _ = update(
-            &mut model,
-            Msg::FeatureInvoke {
-                generation: None,
-                feature: "dvr".to_owned(),
-                verb: "play a.vdvr".to_owned(),
-            },
-        );
-        let _ = dvr.poll(&mut model);
+        verb(&mut model, &mut dvr, "play a.vdvr");
         entered.recv().unwrap();
         assert_eq!(Arc::strong_count(&dvr.exporting), 1, "a read is no export");
         assert_eq!(dvr.finish_within(Duration::MAX), None);
         drop(gate);
-        let left: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(left, ["a.vdvr"]);
     }
 }
