@@ -28,8 +28,8 @@ use view_core::events::UiEvent;
 use view_core::model::Model;
 use view_core::msg::{Effect, RpcCall};
 use view_core::native::speculate::{
-    cmdline_expiry_left, fold_engine_call, fold_expiry, fold_key_arrival, fold_redraw, SpecStamp,
-    SPECULATION_MAX_AGE,
+    cmdline_expiry_left, fold_engine_call, fold_engine_call_unpredicted, fold_expiry,
+    fold_key_arrival, fold_redraw, SpecStamp, SPECULATION_MAX_AGE,
 };
 
 /// The fixed origin every [`SpecStamp`] in one session is measured from.
@@ -127,8 +127,9 @@ pub(crate) fn next_expiry(model: &Model, clock: SpeculationClock) -> Option<Dura
 /// command line a `:` opens -- rather than a
 /// `cfg` at each of the loop's four call sites: with nothing ever pending,
 /// reconciliation, expiry and the expiry deadline are already the no-ops
-/// they are outside a typing burst, so the arm differs from the shipped
-/// binary in exactly one branch that a release build folds away.
+/// they are outside a typing burst. The arm folds every key the engine is
+/// sent as the shipped binary does, the typed-ahead hold's readings
+/// included, and skips only the two folds that make a guess.
 const PREDICTS: bool = !cfg!(feature = "bench-no-speculate");
 
 // `task bench` and `task heartbeat-ab` set VIEW_BENCH_NO_SPECULATE for the
@@ -155,6 +156,8 @@ const _: () = assert!(
 pub(crate) fn note_engine_call(model: &mut Model, call: &RpcCall, clock: SpeculationClock) {
     if PREDICTS {
         fold_engine_call(model, call, clock.now());
+    } else {
+        fold_engine_call_unpredicted(model, call, clock.now());
     }
 }
 

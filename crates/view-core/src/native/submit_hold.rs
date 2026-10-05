@@ -9,11 +9,13 @@
 //!
 //! Over a slow link a query typed ahead still reaches the buffer when an
 //! answer to an earlier key arrives later than the slowest of the recent
-//! round trips: no message from nvim names the key it answers. On a link
-//! that has just slowed, `v` and then `<Esc>` leave the visual report
-//! landing a round trip after `<Esc>` went out, where it reads as the
-//! answer to `<Esc>`, so `<Space>ff` typed next runs the picker with
-//! nothing held.
+//! round trips after a later key: no message from nvim names the key it
+//! answers. On a link that has just slowed, `v` and then `<Esc>` leave the
+//! visual report landing a round trip after `<Esc>` went out, where it
+//! reads as the answer to `<Esc>`, so `<Space>ff` typed next runs the
+//! picker with nothing held. A key typed a round trip after the one before
+//! it reads any answer since as its own, so the same holds where an answer
+//! to the key before it lands after it.
 //!
 //! A key the user maps that view has not read yet, typed more than a
 //! round trip before a view key and drawing nothing, is read as the
@@ -21,7 +23,10 @@
 //! `maplist()` again.
 //!
 //! A hold armed where nvim needed none keeps the keys for one bound, then
-//! sends the same keys in the same order.
+//! sends the same keys in the same order. It ends sooner where the hold
+//! settles while nvim reports a mode out of normal mode, reported since the
+//! newest key that unsettled it went out. A key that changes nothing nvim
+//! reports, `<Left>` in insert mode, leaves such a hold to its bound.
 
 pub mod commands;
 mod refused;
@@ -336,11 +341,20 @@ pub struct SubmitHold {
     /// user's mappings, has put view's reading of the keys in doubt. The
     /// hold then settles only once nothing is owed.
     doubt: bool,
-    /// When the newest key sent while unsettled went to nvim, where the
+    /// When the newest key that unsettled the hold went to nvim, where the
     /// host stamped it, or `None` while that key is folded and not sent.
     sent: Option<SpecStamp>,
+    /// Whether the key `sent` stamps went out apart, as
+    /// [`SubmitHold::note_key_sent`] reads it.
+    sent_apart: bool,
+    /// When the newest key of any kind went to nvim.
+    last_key: Option<SpecStamp>,
+    /// Whether the newest key went out alone.
+    key_alone: bool,
     /// When the newest batch answering a key arrived.
     answered: Option<SpecStamp>,
+    /// When the newest batch reporting a mode arrived.
+    mode_reported: Option<SpecStamp>,
     /// Keys a surface of view's own is holding while they spell the start
     /// of a mapped sequence.
     sequence: Vec<String>,
@@ -719,14 +733,42 @@ impl SubmitHold {
     }
 
     /// Stamps a line end folded from the key now going to nvim at `now`,
-    /// and the key itself while the hold is unsettled.
-    pub(crate) fn note_key_sent(&mut self, now: SpecStamp) {
+    /// the key itself, and the key as `sent` where it unsettled the hold.
+    ///
+    /// The key goes out apart where it is the first, where it goes out at
+    /// least `floor` after the key before it, or, before any round trip is
+    /// read, where a batch answering a key has arrived since the key before
+    /// it went out (`answered`). It goes out alone, with no earlier key
+    /// read as in flight, where it goes out apart, or where the key before
+    /// it went out alone and has been answered. A batch arriving before the
+    /// next key goes out then answers this one, unless nvim answered the
+    /// key before it twice.
+    pub(crate) fn note_key_sent(
+        &mut self,
+        now: SpecStamp,
+        floor: Option<Duration>,
+        answered: bool,
+    ) {
         if std::mem::take(&mut self.end_unsent) {
             self.ended_at = Some(now);
         }
-        if self.unsettled {
+        let apart = match (self.last_key, floor) {
+            (None, _) => true,
+            (Some(_), None) => answered,
+            (Some(last), Some(floor)) => now.age_since(last) >= floor,
+        };
+        self.key_alone = apart || (self.key_alone && answered);
+        self.last_key = Some(now);
+        if self.unsettled && self.sent.is_none() {
             self.sent = Some(now);
+            self.sent_apart = apart;
         }
+    }
+
+    /// Whether the newest key went out alone, as [`Self::note_key_sent`]
+    /// reads it.
+    pub(crate) fn newest_key_alone(&self) -> bool {
+        self.key_alone
     }
 
     /// Notes a key arriving at `now`, before it is folded, with `floor` the
@@ -851,25 +893,52 @@ impl SubmitHold {
 
     /// Whether `msg` ends a standing hold: the command's own notification,
     /// the bound this hold armed, or, for a hold a key sequence armed, a
-    /// mode nvim reports leaving normal mode for once the hold is settled,
-    /// which says the sequence ran no mapping. A report before then may
+    /// batch arriving once the hold is settled while nvim is out of normal
+    /// mode, by the batch's own report or else by `mode`, the last one.
+    /// That says the sequence ran no mapping. A report before then may
     /// answer a key sent ahead of the sequence.
-    fn ended_by(&self, msg: &Msg) -> bool {
+    fn ended_by(&self, msg: &Msg, mode: &str) -> bool {
         let Some((armed, _)) = &self.held else {
             return false;
         };
-        let leaves = |mode: &str| mode != "normal" && !self.unsettled;
         match msg {
             Msg::FeatureInvoke { .. } => true,
             Msg::SubmitHoldExpired { generation } => *generation == self.generation,
             Msg::Redraw(events) => {
-                *armed == Armed::Sequence
-                    && events.iter().any(
-                        |event| matches!(event, UiEvent::ModeChange { mode, .. } if leaves(mode)),
-                    )
+                let mut reported = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        UiEvent::ModeChange { mode, .. } => Some(mode.as_str()),
+                        _ => None,
+                    })
+                    .peekable();
+                let out = match reported.peek() {
+                    Some(_) => reported.any(|mode| mode != "normal"),
+                    None => mode != "normal",
+                };
+                *armed == Armed::Sequence && self.settled_out_of_normal(out)
             }
             _ => false,
         }
+    }
+
+    /// Whether the hold has settled with `out` true of a mode nvim reported
+    /// since the newest key that unsettled it went out.
+    ///
+    /// An answer to an earlier key can settle the hold, and a mode reported
+    /// before that key went out may be one the key leaves, as `<CR>` leaves
+    /// a command line.
+    fn settled_out_of_normal(&self, out: bool) -> bool {
+        let reported_since = self
+            .mode_reported
+            .zip(self.sent)
+            .is_some_and(|(reported, sent)| reported >= sent);
+        !self.unsettled && out && reported_since
+    }
+
+    /// Notes a batch reporting a mode, arriving at `now`.
+    pub(crate) fn note_mode_arrived(&mut self, now: SpecStamp) {
+        self.mode_reported = Some(now);
     }
 
     /// Keeps `msg` when a hold stands and it is input, handing it back
@@ -894,11 +963,10 @@ impl SubmitHold {
 
     /// Notes a redraw batch nvim sent because it read a key, arriving at
     /// `now`, with `floor` the slowest of the recent round trips, `None`
-    /// before nvim has answered a key. It may
-    /// settle the hold, as `typed_ahead::settle` states. Where it also
-    /// moved the cursor or changed the mode (`finished`) and settles the
-    /// hold, no key waits on an argument: nvim moves nothing while a key
-    /// waits for one.
+    /// before nvim has answered a key. It may settle the hold, as
+    /// `typed_ahead::settle` states. Where it also moved the cursor or
+    /// changed the mode (`finished`) and settles the hold, no key waits on
+    /// an argument: nvim moves nothing while a key waits for one.
     pub(crate) fn note_input_answered(
         &mut self,
         now: SpecStamp,
@@ -1310,9 +1378,20 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
 #[must_use]
 pub fn releases(model: &Model, msg: &Msg) -> bool {
     let hold = &model.submit_hold;
-    hold.ended_by(msg)
+    hold.ended_by(msg, &model.engine.mode.current)
         || matches!(hold.held, Some((Armed::Command, _)))
             && matches!(msg, Msg::Redraw(events) if refused::reports_error(model, events))
+}
+
+/// Whether input arriving now ends the standing hold a key sequence armed:
+/// the input's arrival settled the hold while the mode nvim last reported,
+/// since the key that unsettled it, is out of normal mode, so the sequence
+/// ran no mapping.
+#[must_use]
+pub fn released_by_input(model: &Model) -> bool {
+    let hold = &model.submit_hold;
+    matches!(hold.held, Some((Armed::Sequence, _)))
+        && hold.settled_out_of_normal(model.engine.mode.current != "normal")
 }
 
 /// Starts a hold, bounded by the link's own backstop so a command that
@@ -2718,6 +2797,30 @@ mod tests {
         for (notation, at) in [(" ", 200), ("e", 210)] {
             let _ = send_at(&mut model, notation, at);
         }
+        assert!(!model.submit_hold.is_holding());
+    }
+
+    /// A build that predicts nothing reads the keys going to nvim into the
+    /// hold as the shipped one does, so a key nvim answered settles the
+    /// hold there too and text typed behind it never arms.
+    #[test]
+    fn a_build_predicting_nothing_settles_the_hold_as_the_shipped_one_does() {
+        let mut model = claiming(&[Some("<Space>e")]);
+        let send = |model: &mut Model, notation: &str, at: u64| {
+            let stamp = crate::native::speculate::SpecStamp::new(Duration::from_millis(at));
+            crate::native::speculate::fold_key_arrival(model, stamp);
+            for effect in crate::update::update(model, key(notation)) {
+                if let Effect::Rpc(call) = effect {
+                    crate::native::speculate::fold_engine_call_unpredicted(model, &call, stamp);
+                }
+            }
+        };
+        send(&mut model, "j", 0);
+        let _ = answer_at(&mut model, None, 50);
+        send(&mut model, "o", 100);
+        let _ = answer_at(&mut model, Some("insert"), 101);
+        send(&mut model, " ", 200);
+        send(&mut model, "e", 210);
         assert!(!model.submit_hold.is_holding());
     }
 

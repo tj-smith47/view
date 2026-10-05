@@ -184,8 +184,17 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         model.dvr.hold_live(msg);
         return Vec::new();
     }
+    let mut effects = Vec::new();
+    // the keys held go out ahead of the input whose arrival ended the hold
+    if matches!(msg, Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_))
+        && crate::native::submit_hold::released_by_input(model)
+    {
+        for held in model.submit_hold.take_held() {
+            effects.extend(update(model, held));
+        }
+    }
     let Some(msg) = model.submit_hold.hold(msg) else {
-        return Vec::new();
+        return effects;
     };
     // a prompt view raised itself answers in view, and a replay would type
     // its answer into the engine
@@ -193,7 +202,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         model.dvr.record(&msg);
     }
     let releases = crate::native::submit_hold::releases(model, &msg);
-    let mut effects = update_one(model, msg);
+    effects.extend(update_one(model, msg));
     // replayed after the command has run, so the focus it set routes them.
     // A replayed `:View` submit arms a fresh hold, which the rest are then
     // kept behind in order

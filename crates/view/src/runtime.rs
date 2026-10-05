@@ -1729,10 +1729,14 @@ mod tests {
             .split_once("pub(crate) fn dispatch<")
             .expect("the dispatch this walk is about");
         let (body, _) = rest.split_once("\n}").expect("the dispatch's own end");
-        let arrival = body.find("note_key_arrival(model");
-        let fold = body.find("effects.extend(update(model, msg))");
+        let find = |anchor: &str| {
+            body.find(anchor)
+                .unwrap_or_else(|| panic!("this walk lost its anchor `{anchor}` in `dispatch`"))
+        };
+        let arrival = find("note_key_arrival(model");
+        let fold = find("effects.extend(update(model, msg))");
         assert!(
-            arrival.is_some() && fold.is_some() && arrival < fold,
+            arrival < fold,
             "a key no longer settles the typed-ahead hold as it arrives, so a \
              view key typed on a local link holds the query behind it"
         );

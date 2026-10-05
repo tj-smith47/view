@@ -35,10 +35,10 @@ use crate::native::speculate::{is_cmdline_mode, SpecStamp, CMDLINE_LITERAL_KEYS}
 /// after every key one update folds.
 ///
 /// Both readings are set aside for a first key that went out unsettled:
-/// behind a key that may change what nvim reads next, before an answer has
-/// arrived since the newest key and that key is a round trip old. Every key
-/// does, apart from a character typed while view reads insert, replace or a
-/// command line, so typed prose never arms. A hold missed sends the query
+/// behind a key that may change what nvim reads next, before [`settle`]
+/// reads that key as answered. Every key does, apart from a character typed
+/// while view reads insert, replace or a command line, so typed prose never
+/// arms. A hold missed sends the query
 /// into the buffer as commands, and one armed in error ends on a settled
 /// mode report out of normal mode or on its bound.
 pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
@@ -106,26 +106,33 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     complete
 }
 
-/// Settles the hold at `now`, on a batch or a key arriving, once a batch
-/// answering a key has arrived since the newest key sent while it was
-/// unsettled and that key is at least `floor` old. A batch sooner may
-/// answer a key sent before that one, and with no round trip read yet any
-/// batch may. Under a doubt it also waits until
-/// nothing is owed: until the newest key neither was read as an argument
-/// nor takes one and stays in normal mode, since nvim holds a key that
-/// takes an argument until it has it. Without one, view's reading of an
-/// argument is nvim's once nvim has answered.
+/// Settles the hold at `now`, on a batch or a key arriving, once the newest
+/// key that unsettled it is at least `floor` old and a batch answering a
+/// key has arrived at least `floor` after it. A batch sooner may answer a
+/// key sent before that one, and with no round trip read yet any batch
+/// may. Where that key went out at least `floor` after the key before it,
+/// any batch since answers it. Under a doubt it also waits until nothing
+/// is owed: until the newest key neither was read as an argument nor takes
+/// one and stays in normal mode, since nvim holds a key that takes an
+/// argument until it has it. Without one, view's reading of an argument is
+/// nvim's once nvim has answered.
 pub(super) fn settle(hold: &mut SubmitHold, now: SpecStamp, floor: Option<Duration>) {
+    let (Some(sent), Some(answered), Some(floor)) = (hold.sent, hold.answered, floor) else {
+        return;
+    };
+    if answered < sent
+        || now.age_since(sent) < floor
+        || (answered.age_since(sent) < floor && !hold.sent_apart)
+    {
+        return;
+    }
     let owes = |key: &str| CMDLINE_LITERAL_KEYS.contains(&key) && !LEAVES_NORMAL.contains(&key);
     let owed = hold.argument_of.is_some()
         || hold
             .recent
             .back()
             .is_some_and(|newest| newest.argument || owes(newest.key.as_str()));
-    let answered = hold.sent.is_some_and(|sent| {
-        hold.answered >= Some(sent) && floor.is_some_and(|floor| now.age_since(sent) >= floor)
-    });
-    if answered && !(hold.doubt && owed) {
+    if !(hold.doubt && owed) {
         hold.unsettled = false;
         hold.doubt = false;
     }

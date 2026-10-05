@@ -150,16 +150,12 @@ const CMDLINE_BACKSTOP_ROUND_TRIPS: u32 = 3;
 ///
 /// The reading behind it is [`crate::model::EngineModel::key_round_trips`]'s
 /// -- the longest of the last [`KEY_ROUND_TRIPS`] key-to-batch round trips,
-/// which is the half of the pair that cannot be too short without also
+/// each read off a key that went out with no earlier key in flight, which
+/// is the half of the pair that cannot be too short without also
 /// being a bound the session has since stopped deserving.
 #[must_use]
 pub fn cmdline_backstop(model: &Model) -> Duration {
-    model
-        .engine
-        .key_round_trips
-        .iter()
-        .flatten()
-        .max()
+    slowest_trip(model)
         .and_then(|trip| trip.checked_mul(CMDLINE_BACKSTOP_ROUND_TRIPS))
         .unwrap_or(CMDLINE_SPECULATION_BACKSTOP_MIN)
         .clamp(CMDLINE_SPECULATION_BACKSTOP_MIN, SPECULATION_MAX_AGE)
@@ -861,6 +857,16 @@ pub fn fold_key_arrival(model: &mut Model, now: SpecStamp) {
 /// `now` is a stamp the host took from its own fixed origin, since nothing
 /// in this module reads a clock.
 pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
+    fold_call(model, call, now, true);
+}
+
+/// [`fold_engine_call`] for a build that predicts nothing: every reading of
+/// the keys going to the engine is kept, and no glyph or palette is guessed.
+pub fn fold_engine_call_unpredicted(model: &mut Model, call: &RpcCall, now: SpecStamp) {
+    fold_call(model, call, now, false);
+}
+
+fn fold_call(model: &mut Model, call: &RpcCall, now: SpecStamp, predicts: bool) {
     match call {
         RpcCall::Input { notation } => {
             // a key nvim answered with nothing at all (an unmapped function
@@ -875,7 +881,10 @@ pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
             {
                 model.engine.key_unanswered = None;
             }
-            fold_cmdline_key(model, notation, now);
+            let answered = model.engine.key_unanswered.is_none();
+            if predicts {
+                fold_cmdline_key(model, notation, now);
+            }
             // after the fold above, which is the one reading of these two
             // that describes the editor this key is arriving at. The stamp
             // is what the batch answering this key subtracts to read the
@@ -889,8 +898,11 @@ pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
             // session
             model.engine.literal_pending =
                 crate::native::submit_hold::owed_after(model.engine.literal_pending, notation);
-            fold_keystroke(model, notation, now);
-            model.submit_hold.note_key_sent(now);
+            if predicts {
+                fold_keystroke(model, notation, now);
+            }
+            let floor = slowest_trip(model);
+            model.submit_hold.note_key_sent(now, floor, answered);
         }
         RpcCall::InputMouse { .. } => {
             // a click reaches nvim as the key a pending `f` or `m` reads for
@@ -985,6 +997,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
             UiEvent::ModeChange { .. } => {
                 settled = true;
                 answers_input = true;
+                model.submit_hold.note_mode_arrived(now);
             }
             UiEvent::CmdlineShow { .. } => {
                 shows_cmdline = true;
@@ -1015,7 +1028,10 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     if answers_input {
         let floor = slowest_trip(model);
         model.submit_hold.note_input_answered(now, floor, settled);
-        if let Some(sent) = model.engine.key_unanswered.take() {
+        let alone = model.submit_hold.newest_key_alone();
+        // a key sent while an earlier key was in flight may be answered by
+        // a batch answering that one, which reads the link short
+        if let Some(sent) = model.engine.key_unanswered.take().filter(|_| alone) {
             // the one write site, so the read in `cmdline_backstop` is the
             // only place the window's shape is known
             model.engine.key_round_trips[model.engine.key_round_trips_at] =

@@ -689,8 +689,20 @@ fn send(session: &Session, effects: &[Effect]) {
     }
 }
 
+/// Applies every message nvim has already sent, which the runtime's one
+/// channel puts ahead of a key typed now.
+fn caught_up(session: &Session, model: &mut Model) {
+    while let Ok(received) = session.rx.try_recv() {
+        let msgs = dispatched(session, received);
+        let _ = applied(model, msgs, |effects| send(session, effects), &|_, _| {
+            None::<()>
+        });
+    }
+}
+
 /// Types `keys` into `model`, answering the keys it sent nvim.
 fn type_into(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String> {
+    caught_up(session, model);
     let mut sent = Vec::new();
     for key in keys {
         let effects = press_into(model, key);
@@ -705,6 +717,7 @@ fn type_into(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String>
 /// input. nvim reads all of them before it draws again, so no answer to
 /// an early key arrives after a later one went out.
 fn type_at_once(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String> {
+    caught_up(session, model);
     let mut sent = Vec::new();
     for key in keys {
         let effects = press_into(model, key);
@@ -1132,16 +1145,27 @@ fn reading_model(session: &Session, lhs: &str) -> Model {
     model.ai_trusted = true;
     session.register(&NativeConfig::all_enabled());
     let seen = std::cell::Cell::new((false, false));
+    let reads = std::cell::RefCell::new(Vec::new());
     pump(session, &mut model, ARRIVAL, |_, msg| {
         let (claimed, read) = seen.get();
         seen.set(match msg {
             Msg::MappingsClaimed { .. } => (true, read),
-            Msg::UserMappingsRead { keys, .. } => (claimed, keys.iter().any(|keys| keys == lhs)),
+            Msg::UserMappingsRead { keys, .. } => {
+                reads.borrow_mut().push(keys.clone());
+                (claimed, read || keys.iter().any(|keys| keys == lhs))
+            }
             _ => (claimed, read),
         });
         (seen.get() == (true, true)).then_some(())
     })
-    .expect("the registration answers and the user's keys are read");
+    .unwrap_or_else(|| {
+        panic!(
+            "the registration answers and the user's keys are read with {lhs}: \
+             (claimed, read) = {:?}, the reads {:?}",
+            seen.get(),
+            reads.borrow()
+        )
+    });
     assert_eq!(model.engine.mode.current, "normal");
     model
 }
@@ -1238,16 +1262,7 @@ fn keys_typed_ahead_after_a_refused_insert_reach_the_picker() {
          vim.bo.modifiable = false\n",
     );
     let mut model = registered_model(&session);
-    let _ = type_into(&session, &mut model, &["y", "y", "i"]);
-    let refused = |events: &[UiEvent]| {
-        events
-            .iter()
-            .any(|event| matches!(event, UiEvent::MsgShow { kind, .. } if kind == "emsg"))
-    };
-    pump(&session, &mut model, ARRIVAL, |_, msg| {
-        matches!(msg, Msg::Redraw(events) if refused(events)).then_some(())
-    })
-    .expect("nvim refuses the i");
+    refuse_insert(&session, &mut model);
     let keys = [",", "f", "f", "m", "a", "i", "n"];
     let sent = type_into(&session, &mut model, &keys);
     pump(&session, &mut model, ARRIVAL, |_, msg| {
@@ -1258,6 +1273,29 @@ fn keys_typed_ahead_after_a_refused_insert_reach_the_picker() {
     assert_eq!(session.eval("join(getline(1, '$'), '|')"), "foo");
     let query = model.picker_mut().map(|picker| picker.query().to_string());
     assert_eq!(query.as_deref(), Some("main"));
+}
+
+/// Types `yyi` into the fixture's read-only buffer and applies the pump
+/// until nvim refuses the `i`.
+fn refuse_insert(session: &Session, model: &mut Model) {
+    let state = session.eval("[bufnr(), &l:modifiable, v:vim_did_enter, win_gettype()]");
+    let _ = type_into(session, model, &["y", "y", "i"]);
+    let refused = |events: &[UiEvent]| {
+        events
+            .iter()
+            .any(|event| matches!(event, UiEvent::MsgShow { kind, .. } if kind == "emsg"))
+    };
+    pump(session, model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::Redraw(events) if refused(events)).then_some(())
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "nvim refuses the i; before yyi [buf, modifiable, entered, win] = {state}, \
+             now mode {}, held {}",
+            session.eval("mode()"),
+            model.submit_hold.is_holding()
+        )
+    });
 }
 
 /// A read-only buffer, `yyi` refused, then a jump `fm` with each key
@@ -1271,16 +1309,7 @@ fn a_jump_typed_after_a_refused_insert_keeps_the_query_for_the_picker() {
          vim.bo.modifiable = false\n",
     );
     let mut model = registered_model(&session);
-    let _ = type_into(&session, &mut model, &["y", "y", "i"]);
-    let refused = |events: &[UiEvent]| {
-        events
-            .iter()
-            .any(|event| matches!(event, UiEvent::MsgShow { kind, .. } if kind == "emsg"))
-    };
-    pump(&session, &mut model, ARRIVAL, |_, msg| {
-        matches!(msg, Msg::Redraw(events) if refused(events)).then_some(())
-    })
-    .expect("nvim refuses the i");
+    refuse_insert(&session, &mut model);
     let answers = |events: &[UiEvent]| {
         events.iter().any(|event| {
             matches!(
@@ -1418,7 +1447,11 @@ fn keys_typed_ahead_after_leaving_insert_reach_the_picker() {
         })
         .unwrap_or_else(|| panic!("nvim runs view's <leader>ff after {lead:?}"));
         assert_eq!(sent, keys[..lead.len() + 3], "{lead:?}");
-        assert_eq!(session.eval("join(getline(1, '$'), '|')"), "foo");
+        assert_eq!(
+            session.eval("join(getline(1, '$'), '|')"),
+            "foo",
+            "{lead:?}"
+        );
         let picker = model.picker_mut().map(|picker| picker.query().to_string());
         assert_eq!(picker.as_deref(), Some("main"), "{lead:?}");
     }
@@ -1441,6 +1474,48 @@ fn views_key_typed_after_a_paste_behind_a_register_key_is_that_register() {
     sent.extend(type_into(&session, &mut model, &keys));
     assert!(!model.submit_hold.is_holding());
     assert_eq!(sent, ["\"", ",", "f", "f", "m", "a", "i", "n"]);
+    let _ = session.eval("1");
+    assert_eq!(session.invoke(SILENCE), None, "view's key ran nothing");
+    assert!(model.picker_mut().is_none());
+}
+
+/// `"`, a paste, then view's key and a query, all typed at once: view's key
+/// is the register, and nvim runs nothing view invokes. The query is held
+/// for the one bound, then every held key reaches nvim in the order it was
+/// typed, and the picker never opens.
+#[test]
+fn keys_held_behind_a_register_typed_with_a_paste_reach_nvim_in_order_after_the_bound() {
+    let session = Session::start_with(
+        "typed-ahead-paste-at-once",
+        "vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'foo' })\n",
+    );
+    let mut model = registered_model(&session);
+    let mut sent = type_into(&session, &mut model, &["\""]);
+    paste_into(&session, &mut model, "xyz");
+    let mut bound = None;
+    for key in [",", "f", "f", "m", "a", "i", "n"] {
+        let effects = press_into(&mut model, key);
+        fold_calls(&mut model, &effects);
+        send(&session, &effects);
+        sent.extend(inputs(&effects));
+        bound = bound.or_else(|| {
+            effects.iter().find_map(|effect| match effect {
+                Effect::ScheduleSubmitHold { generation, .. } => Some(*generation),
+                _ => None,
+            })
+        });
+    }
+    assert_eq!(sent, ["\"", ",", "f", "f"], "the query is held");
+    let generation = bound.expect("the hold arms its bound");
+    let effects = update(&mut model, Msg::SubmitHoldExpired { generation });
+    fold_calls(&mut model, &effects);
+    send(&session, &effects);
+    assert_eq!(
+        inputs(&effects),
+        ["m", "a", "i", "n"],
+        "the bound releases them"
+    );
+    assert!(!model.submit_hold.is_holding());
     let _ = session.eval("1");
     assert_eq!(session.invoke(SILENCE), None, "view's key ran nothing");
     assert!(model.picker_mut().is_none());
