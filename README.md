@@ -80,9 +80,9 @@ Every key and command is on one page in
 fires: the key, whose mapping it is, and the mapping of yours it took the
 key from.
 
-**Agents in the editor.** An agent panel that speaks ACP, an agent that
-sees the file, selection and diagnostics you are looking at, and every
-proposed change reviewed as a diff in the file itself.
+**Agents in the editor.** A panel for the coding agent you already run, an
+agent that sees the file, selection and diagnostics you are looking at, and
+every proposed change reviewed as a diff in the file itself.
 
 ![the agent panel open beside a buffer, reviewing a proposed change](assets/tapes/agent-panel.gif)
 
