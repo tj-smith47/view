@@ -1035,6 +1035,15 @@ mod tests {
         fn open_file(&self, _path: &str) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn open_picked(
+            &self,
+            _name: &str,
+            _line: Option<u64>,
+            _buffer: bool,
+            _how: view_core::msg::OpenIn,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn rename_file(
             &self,
             _old_path: &str,

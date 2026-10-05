@@ -19,9 +19,7 @@ use super::route::take_binding;
 /// current selection, or no effect at all when there is nothing to preview (an
 /// empty result set, or an unnamed `Buffers` scratch entry -- see
 /// `PickerState::selected_path`'s doc). Shared by every arm that can move
-/// the selection: today that is only `Msg::PickerResults` (no arrow-key/
-/// Enter navigation exists yet), but the seam is named rather than inlined
-/// so a future navigation arm reuses it instead of re-deriving the request.
+/// the selection: a result batch landing and a selection key.
 pub(super) fn picker_preview_request(
     state: &mut crate::native::picker::PickerState,
 ) -> Vec<Effect> {

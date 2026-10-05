@@ -1932,6 +1932,20 @@ pub enum ReviewOpenTarget {
     Split,
 }
 
+/// The window a picker result opens in.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenIn {
+    /// The window the picker was opened from.
+    Current,
+    /// A vertical split of it.
+    Vertical,
+    /// A horizontal split of it.
+    Horizontal,
+    /// A new tab.
+    Tab,
+}
+
 /// Which side of the current window a windowed surface splits off.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2457,6 +2471,13 @@ pub enum RpcCall {
     /// reply to act on.
     OpenFile {
         path: String,
+    },
+    /// Opens the picker result `target` in the window `how` names, the
+    /// cursor on its line when it has one. Fire-and-forget on
+    /// [`Self::OpenFile`]'s terms: the picker closes on the same keypress.
+    OpenPicked {
+        target: crate::native::picker::Picked,
+        how: OpenIn,
     },
     /// Opens a window for one of view's own surfaces: a scratch buffer no
     /// one can type into, split off the current window at `split`, `size`

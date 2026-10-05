@@ -10,6 +10,7 @@ mod decode;
 mod fit;
 mod mappings;
 pub(crate) mod native_window;
+mod picked;
 mod window_status;
 
 use crate::handle::{EngineError, EngineHandle};

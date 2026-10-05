@@ -339,15 +339,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                 p.note_answer(&notation);
                 vec![Effect::Rpc(RpcCall::Input { notation })]
             }
-            // every other key edits the query and re-asks the
-            // matcher worker; edit_query itself decides what a
-            // notation means (a plain char, <BS>, or a no-op it
-            // still bumps the generation for), so this arm never
-            // inspects notation itself.
-            Some(OverlayKind::Picker(p)) => {
-                let generation = p.edit_query(&notation);
-                vec![picker_query(p, generation)]
-            }
+            Some(OverlayKind::Picker(_)) => super::picker_keys::picker_key(model, &notation),
             Some(OverlayKind::Tree(_)) => {
                 sequence_key(model, notation, modal_was_open, surfaces::tree_key)
             }

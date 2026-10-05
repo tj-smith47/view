@@ -5,10 +5,10 @@
 view 626
 view-ai 303
 view-bench 289
-view-core 1062
+view-core 1060
 view-engine 886
 view-harness 450
-view-native 218
+view-native 217
 view-oracle 709
 view-proc 23
 view-surface 128

@@ -69,6 +69,7 @@ pub(crate) mod key_log;
 pub(crate) mod look;
 mod mouse;
 mod paste;
+pub(crate) mod picker_keys;
 mod resize;
 pub(super) mod review;
 mod route;

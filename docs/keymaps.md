@@ -100,6 +100,31 @@ Inside the tree:
 `r` and `d` do nothing on a directory. The resize keys under
 [Resizing the sidebars](#resizing-the-sidebars) work here too.
 
+## Inside the picker
+
+`<leader>ff`, `<leader>fb` and `<leader>fg` open the picker on your files,
+your buffers or a search of your files' text. A key that types a character
+adds it to the query.
+
+| key | does |
+| --- | --- |
+| `<Down>` | select the next result |
+| `<C-n>` | select the next result |
+| `<C-j>` | select the next result |
+| `<Up>` | select the previous result |
+| `<C-p>` | select the previous result |
+| `<C-k>` | select the previous result |
+| `<CR>` | open the selected result in the window you came from |
+| `<C-v>` | open the selected result in a vertical split |
+| `<C-x>` | open the selected result in a horizontal split |
+| `<C-t>` | open the selected result in a new tab |
+| `<BS>` | delete the last character of the query |
+| `<Esc>` | close the picker |
+
+A file opens the file, a search result opens its file on the matching line,
+and a buffer switches to that buffer. The picker closes as the result opens.
+With no results, `<CR>` does nothing.
+
 ## Your own keys reach nvim under nvim's names
 
 Every key view does not own itself is forwarded to nvim by the name nvim

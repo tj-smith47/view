@@ -212,10 +212,10 @@ pub fn spawn_live_grep_scan(
             // buffer actually holds: accepted here because the walker runs
             // on its own background thread over an entire tree, and an RPC
             // round trip per candidate file would defeat the whole point of
-            // scanning off the paint loop (see this module's own doc). The
-            // picker's `<CR>`-open flow re-resolves through the live buffer
-            // regardless, so a stale grep result never writes anything; it
-            // can only mislead the label shown before that.
+            // scanning off the paint loop (see this module's own doc).
+            // Opening a match reaches nvim's live buffer for the path and
+            // writes nothing, so a stale result can only put the cursor on
+            // the line the disk copy had.
             let result = searcher.search_path(
                 &matcher,
                 entry.path(),
@@ -539,13 +539,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `PickerItem::path`/`line` are read nowhere in production yet (the
-    /// `<CR>`-open flow still resolves the selection through
-    /// `PickerState::selected_path`, not these fields directly), so nothing
-    /// else in this suite pins their values -- only the display label's
-    /// shape. This proves the fields themselves carry the right data end to
-    /// end from a live scan, independent of the label they were built
-    /// alongside.
+    /// `PickerItem::path`/`line` are what opening a match reads, and
+    /// nothing else in this suite pins their values, only the display
+    /// label's shape. This shows the fields themselves carry the right data
+    /// end to end from a live scan, independent of the label they were
+    /// built alongside.
     #[test]
     fn a_matching_lines_item_carries_its_path_and_line_as_real_fields() {
         let nonce = format!(

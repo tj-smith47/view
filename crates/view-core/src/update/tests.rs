@@ -9232,10 +9232,9 @@ fn esc_on_an_open_picker_emits_picker_close() {
 }
 
 /// A candidate landing in `Msg::PickerResults` must itself trigger a
-/// preview request for the now-selected row -- there is no separate
-/// navigation message yet, so `PickerResults` is the only place a
-/// selection is ever established. Disabling `picker_preview_request`'s
-/// call in that arm makes this fail by name.
+/// preview request for the now-selected row: the first selection is
+/// established there, before any selection key is pressed. Disabling
+/// `picker_preview_request`'s call in that arm makes this fail by name.
 #[test]
 fn picker_results_issues_a_preview_request_for_the_selected_candidate() {
     let mut m = model();

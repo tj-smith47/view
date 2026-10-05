@@ -5,8 +5,8 @@
 //! so growing the surface never grows the loop's own file.
 
 use view_core::msg::{
-    BufferHandle, HunkMark, OptionValue, ReplyToken, ReplyValue, ReviewOpenTarget, TakeoverStep,
-    TextEdit, WinSplit,
+    BufferHandle, HunkMark, OpenIn, OptionValue, ReplyToken, ReplyValue, ReviewOpenTarget,
+    TakeoverStep, TextEdit, WinSplit,
 };
 use view_core::native::ai_context::{
     CurrentBufferRead, CursorRead, DiagnosticEntry, QuickfixEntry, SelectionRead,
@@ -188,6 +188,15 @@ pub trait EngineOps {
     /// rather than duplicating it; fire-and-forget, no reply (see
     /// `RpcCall::OpenFile`).
     fn open_file(&self, path: &str) -> Result<(), EngineError>;
+    /// Opens a picker result in the window `how` names, the cursor on
+    /// `line`; fire-and-forget, no reply (see `RpcCall::OpenPicked`).
+    fn open_picked(
+        &self,
+        name: &str,
+        line: Option<u64>,
+        buffer: bool,
+        how: OpenIn,
+    ) -> Result<(), EngineError>;
     /// Renames `old_path` to `new_path`, retargeting any open buffer along
     /// with it, tagged `generation`; never blocks, and never itself returns
     /// the answer (see `RpcCall::RenameFile`, `Msg::TreeRenameReply`).
@@ -484,6 +493,15 @@ impl EngineOps for EngineHandle {
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         self.open_file(path)
     }
+    fn open_picked(
+        &self,
+        name: &str,
+        line: Option<u64>,
+        buffer: bool,
+        how: OpenIn,
+    ) -> Result<(), EngineError> {
+        self.open_picked(name, line, buffer, how)
+    }
     fn rename_file(
         &self,
         old_path: &str,
@@ -734,6 +752,15 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         (**self).open_file(path)
+    }
+    fn open_picked(
+        &self,
+        name: &str,
+        line: Option<u64>,
+        buffer: bool,
+        how: OpenIn,
+    ) -> Result<(), EngineError> {
+        (**self).open_picked(name, line, buffer, how)
     }
     fn rename_file(
         &self,
@@ -988,6 +1015,15 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         (**self).open_file(path)
+    }
+    fn open_picked(
+        &self,
+        name: &str,
+        line: Option<u64>,
+        buffer: bool,
+        how: OpenIn,
+    ) -> Result<(), EngineError> {
+        (**self).open_picked(name, line, buffer, how)
     }
     fn rename_file(
         &self,
@@ -1306,6 +1342,15 @@ impl EngineOps for FakeOps {
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         self.record(format!("open_file({path})"))
     }
+    fn open_picked(
+        &self,
+        name: &str,
+        line: Option<u64>,
+        buffer: bool,
+        how: OpenIn,
+    ) -> Result<(), EngineError> {
+        self.record(format!("open_picked({name},{line:?},{buffer},{how:?})"))
+    }
     fn rename_file(
         &self,
         old_path: &str,
@@ -1613,6 +1658,15 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn open_file(&self, _path: &str) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn open_picked(
+        &self,
+        _name: &str,
+        _line: Option<u64>,
+        _buffer: bool,
+        _how: OpenIn,
+    ) -> Result<(), EngineError> {
         Ok(())
     }
     fn rename_file(

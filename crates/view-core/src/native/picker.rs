@@ -128,6 +128,20 @@ impl PickerItem {
     }
 }
 
+/// The result a picker key opens: a file, at a line for a grep match, or
+/// one of nvim's listed buffers.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picked {
+    /// The file's path, or the buffer's name as `nvim_buf_get_name` gives
+    /// it (empty for an unnamed buffer).
+    pub name: String,
+    /// The 1-based line the cursor lands on.
+    pub line: Option<u64>,
+    /// Whether `name` names a listed buffer.
+    pub buffer: bool,
+}
+
 /// One open picker session: which corpus it searches, the query typed so
 /// far, and the last (never stale) result set the matcher answered.
 #[non_exhaustive]
@@ -353,6 +367,36 @@ impl PickerState {
             // file (see `PickerItem::grep_match`'s doc).
             Source::LiveGrep { root } => item.path.as_deref().map(|rel| join_display(root, rel)),
         }
+    }
+
+    /// Moves the selection `delta` rows, held between the first result and
+    /// the last. Returns whether the selection changed, so a move at either
+    /// end asks for no preview.
+    pub fn move_selection(&mut self, delta: isize) -> bool {
+        let last = self.items.len().saturating_sub(1);
+        let next = self.selected.saturating_add_signed(delta).min(last);
+        let moved = next != self.selected;
+        self.selected = next;
+        moved
+    }
+
+    /// What opening the selected candidate reaches, or `None` with no
+    /// results. A `Buffers` candidate names its buffer by the name nvim
+    /// gave it, empty for an unnamed one.
+    #[must_use]
+    pub fn selected_target(&self) -> Option<Picked> {
+        let item = self.items.get(self.selected)?;
+        let buffer = matches!(self.source, Source::Buffers);
+        let name = if buffer {
+            self.selected_path().unwrap_or_default()
+        } else {
+            self.selected_path()?
+        };
+        Some(Picked {
+            name,
+            line: item.line,
+            buffer,
+        })
     }
 
     /// Allocates a fresh preview generation for the currently selected

@@ -719,6 +719,13 @@ fn render_dvr_keys() -> String {
     render_overlay_table(&crate::update::dvr::DVR_KEYS)
 }
 
+/// The picker's keys as a markdown table, pinned to the page for the reason
+/// [`render_history_table`] is.
+#[cfg(test)]
+fn render_picker_keys() -> String {
+    render_overlay_table(crate::update::picker_keys::PICKER_KEYS)
+}
+
 /// A table of keys an overlay answers itself, one `(key, does)` row each.
 #[cfg(test)]
 fn render_overlay_table(keys: &[(&str, &str)]) -> String {
@@ -1128,6 +1135,18 @@ mod tests {
     #[test]
     fn dvr_keys_table_matches_the_docs() {
         let table = render_dvr_keys();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymaps.md");
+        let text = std::fs::read_to_string(&path).expect("docs/keymaps.md must be readable");
+        assert!(
+            text.contains(&table),
+            "docs/keymaps.md is stale, it must carry:\n{table}"
+        );
+    }
+
+    /// The picker's table, pinned the same way as the history overlay's.
+    #[test]
+    fn picker_keys_table_matches_the_docs() {
+        let table = render_picker_keys();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymaps.md");
         let text = std::fs::read_to_string(&path).expect("docs/keymaps.md must be readable");
         assert!(
