@@ -701,6 +701,11 @@ fn caught_up(session: &Session, model: &mut Model) {
 }
 
 /// Types `keys` into `model`, answering the keys it sent nvim.
+///
+/// What nvim has already sent is applied before the first key and nothing
+/// between them, so keys that reach view inside one round trip are typed
+/// in one call: split across two, a stall of this thread lets nvim's
+/// answer to the first be applied ahead of the second.
 fn type_into(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String> {
     caught_up(session, model);
     let mut sent = Vec::new();
@@ -1682,13 +1687,12 @@ fn keys_behind_a_view_line_nvim_refuses_reach_nvim_on_its_error() {
             .expect("nvim must draw the E492 its line reports");
         }
         assert_eq!(type_into(&session, &mut model, &line).len(), line.len());
-        assert_eq!(type_into(&session, &mut model, &["<CR>"]), ["<CR>"]);
+        let behind = ["<CR>", "i", "h", "e", "l", "l", "o"];
+        assert_eq!(type_into(&session, &mut model, &behind), ["<CR>"], "{name}");
         assert!(
             model.submit_hold.is_holding(),
             "{name}: the line names View"
         );
-        let typed = ["i", "h", "e", "l", "l", "o"];
-        assert!(type_into(&session, &mut model, &typed).is_empty(), "{name}");
 
         let released = pump(&session, &mut model, ARRIVAL, |model, msg| {
             if matches!(msg, Msg::FeatureInvoke { .. }) {
@@ -1760,9 +1764,9 @@ fn keys_behind_a_wrapped_view_line_reach_what_it_opened(session: &Session, model
         .collect();
     let line: Vec<&str> = line.iter().map(String::as_str).collect();
     assert_eq!(type_into(session, model, &line).len(), line.len());
-    assert_eq!(type_into(session, model, &["<CR>"]), ["<CR>"]);
+    let behind = ["<CR>", "a", "b", "c"];
+    assert_eq!(type_into(session, model, &behind), ["<CR>"]);
     assert!(model.submit_hold.is_holding(), "the line names View");
-    assert!(type_into(session, model, &["a", "b", "c"]).is_empty());
 
     // nothing is read until nvim has answered a request behind the line,
     // so the redraw that leaves the command line is already staged when
