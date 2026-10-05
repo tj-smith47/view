@@ -287,9 +287,10 @@ mod tests {
     }
 
     /// The DVR rows measure a recording session only while the config the
-    /// view side reads, parsed the way view parses it, turns the recording
-    /// on; a table view refuses leaves every default in place, recording
-    /// off, and the row measures the plain path under the DVR's name.
+    /// view side reads, layered the way view layers it, turns the recording
+    /// on. A table view refuses, or a `VIEW_DVR_*` variable the side hands
+    /// the child, leaves the recording off and the row measures the plain
+    /// path under the DVR's name.
     #[test]
     fn a_dvr_cell_hands_the_view_side_a_config_that_records() {
         for fixture in DIAGNOSTIC_MATRIX
@@ -312,10 +313,27 @@ mod tests {
                 Some(&toml::Value::Boolean(true)),
                 "{fixture}: no `[dvr] enabled = true` in {written}"
             );
-            let loaded = view_native::config::ViewConfig::load(Some(&config)).unwrap();
+            let file = view_native::config::ViewConfig::load(Some(&config)).unwrap();
+            // the child sees the side's variables and, of the host's, only
+            // the ones the hermetic spawn lets through
+            let env = |name: &str| {
+                let host = || {
+                    view_engine::env::is_hermetic_passthrough(name.as_ref())
+                        .then(|| std::env::var(name).ok())
+                        .flatten()
+                };
+                side.env
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.to_string_lossy().into_owned())
+                    .or_else(host)
+            };
+            // the bench passes view no flag that reaches `[dvr]`
+            let flags = view_native::config::Overrides::default();
+            let resolved = view_native::config::resolve_with(&file, &flags, &env);
             assert!(
-                loaded.dvr.enabled,
-                "{fixture}: view reads the recording off"
+                resolved.tables.dvr.enabled,
+                "{fixture}: view resolves the recording off"
             );
         }
     }

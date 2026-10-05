@@ -24,6 +24,25 @@ pub(super) fn print_cells() {
     }
 }
 
+/// The refusal a `--list` run owes when other flags stand beside it, naming
+/// each: the listing measures nothing, so every one would go unread.
+pub(super) fn listing_refusal(matches: &clap::ArgMatches) -> Option<String> {
+    use clap::parser::ValueSource;
+    let command = <Cli as clap::CommandFactory>::command();
+    let unread: Vec<String> = command
+        .get_arguments()
+        .filter(|arg| arg.get_id() != "list")
+        .filter(|arg| matches.value_source(arg.get_id().as_str()) == Some(ValueSource::CommandLine))
+        .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+        .collect();
+    (!unread.is_empty()).then(|| {
+        format!(
+            "--list prints the cells and measures none, so {} would go unread",
+            unread.join(", ")
+        )
+    })
+}
+
 /// Runs one matrix cell and returns the metrics the baseline records for
 /// it, refusing any metric name the gate policy has not classified.
 ///

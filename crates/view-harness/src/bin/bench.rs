@@ -173,9 +173,9 @@ const CLASS_SCOPED: &[(&str, &[&str])] = &[
 /// Cells that decompose a gated row instead of being one. They are
 /// measured on demand, never selected by `--all`, and refused under
 /// `--record`/`--gate`: a bar recorded from one would gate the
-/// decomposition rather than the row it exists to explain, and the
-/// decomposition runs the instrumented build, whose numbers are not the
-/// quantity any recorded bar was taken from.
+/// decomposition rather than the row it exists to explain, and the ones
+/// that run an instrumented build take numbers that are not the quantity
+/// any recorded bar was taken from.
 ///
 /// `memory/heavy` is the equivalence-matrix resource leg (spec 3.4,
 /// ledger E2): it decomposes the gated `memory/minimal` row's own-process
@@ -308,8 +308,10 @@ struct Cli {
     #[arg(long)]
     all: bool,
     /// Print every matrix cell and every on-demand diagnostic cell, then
-    /// exit without measuring
-    #[arg(long, exclusive = true)]
+    /// exit without measuring. Takes no other flag: the listing reads no
+    /// class, build or fixture, so a run that passes one beside it is
+    /// refused naming the flag that would go unread
+    #[arg(long)]
     list: bool,
     /// Machine class the numbers belong to (e.g. dev-linux); baselines
     /// are stored and gated per class. The name must carry exactly one of
@@ -331,11 +333,11 @@ struct Cli {
     gate: bool,
     /// Path to the release view binary. Scope: the rows that measure the
     /// shipped build (first_paint, startup, scroll, dvr_scroll, memory,
-    /// remote_memory, flood, picker, supervision). The rows that measure a bench arm take
-    /// the flag naming that arm, and a run that passes this flag while one
-    /// of them is selected without its own flag is refused, since this one
-    /// would go unread for that row. Every one of these flags is refused
-    /// when no selected row reads it at all
+    /// remote_memory, flood, picker, supervision). The rows that measure a
+    /// bench arm take the flag naming that arm, and a run that passes this
+    /// flag while one of them is selected without its own flag is refused,
+    /// since this one would go unread for that row. Every one of these
+    /// flags is refused when no selected row reads it at all
     #[arg(long)]
     view_bin: Option<PathBuf>,
     /// Path to the nvim binary (must match .engine-pin)
@@ -970,8 +972,13 @@ fn resolve_view_bin(cli: &Cli) -> Result<PathBuf> {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let matches = <Cli as clap::CommandFactory>::command().get_matches();
+    let cli =
+        <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     if cli.list {
+        if let Some(refusal) = rows::listing_refusal(&matches) {
+            bail!(refusal);
+        }
         rows::print_cells();
         return Ok(());
     }
@@ -1089,9 +1096,8 @@ fn main() -> Result<()> {
         if cell_named(DIAGNOSTIC_MATRIX) && (cli.record || cli.gate || cli.campaign.is_some()) {
             bail!(
                 "{scenario}/{fixture} is a report-only diagnostic cell: it decomposes another \
-                 row on the instrumented build and holds no bar of its own, so it can be \
-                 neither recorded nor gated, and a campaign over it would propose a seat for a \
-                 bar that does not exist"
+                 row and holds no bar of its own, so it can be neither recorded nor gated, \
+                 and a campaign over it would propose a seat for a bar that does not exist"
             );
         }
         if let Some(reason) = platform_block(&scenario) {
@@ -2248,13 +2254,22 @@ mod tests {
     }
 
     /// `--list` stands alone, and every other run still names its class:
-    /// the empty default exists only so the listing parses.
+    /// the empty default exists only so the listing parses. A flag beside
+    /// `--list` is refused by name.
     #[test]
     fn list_needs_no_class_and_a_run_still_does() {
-        use clap::Parser as _;
+        use clap::{CommandFactory as _, Parser as _};
         assert!(Cli::try_parse_from(["bench", "--list"]).is_ok_and(|cli| cli.list));
         assert!(Cli::try_parse_from(["bench", "--all"]).is_err());
-        assert!(Cli::try_parse_from(["bench", "--list", "--all"]).is_err());
+        let refusal = |args: &[&str]| {
+            let matches = Cli::command().try_get_matches_from(args).unwrap();
+            rows::listing_refusal(&matches)
+        };
+        assert_eq!(refusal(&["bench", "--list"]), None);
+        assert_eq!(
+            refusal(&["bench", "--list", "--class", "dev-linux", "--all"]).as_deref(),
+            Some("--list prints the cells and measures none, so --all, --class would go unread")
+        );
     }
 
     /// Every scenario the table names has to be one the matrix can select,

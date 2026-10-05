@@ -137,6 +137,9 @@ fn keep_size_set_in_nvim(model: &mut Model, surface: NativeSurface, cells: u16, 
 /// The percent of `extent` stored for a sidebar nvim sized to `cells`: the
 /// smallest whose share is `cells`, or, where one percent of `extent` is
 /// more than one cell and none is, the largest whose share stays under it.
+/// A width outside the sidebar's percent range is stored at the nearer
+/// bound, so one narrower than the narrowest share reopens wider than nvim
+/// left it.
 fn pct_for_cells(cells: u16, extent: u16) -> u16 {
     let smallest = (u32::from(cells) * 100).div_ceil(u32::from(extent));
     let smallest = u16::try_from(smallest).unwrap_or(u16::MAX);
@@ -288,13 +291,30 @@ mod tests {
     /// extent from 80 to 300 and every width from 15 to 70 percent. Past
     /// 100 cells one percent is more than one cell, so some widths no
     /// percent reproduces; those reopen at the widest share under them, and
-    /// no such width exists at 100 cells or fewer.
+    /// no such width exists at 100 cells or fewer. A width outside the
+    /// range reopens at the nearer bound's share.
     #[test]
     fn a_width_set_in_nvim_reopens_at_the_same_cells() {
         let percents = MIN_PANEL_WIDTH_PCT..=MAX_PANEL_WIDTH_PCT;
         for extent in 80..=300 {
             let reachable: Vec<u16> = percents.clone().map(|p| share(extent, p)).collect();
-            for cells in share(extent, MIN_PANEL_WIDTH_PCT)..=share(extent, MAX_PANEL_WIDTH_PCT) {
+            let skips = reachable
+                .windows(2)
+                .any(|pair| matches!(pair, [a, b] if b - a > 1));
+            if extent <= 100 {
+                assert!(!skips, "one percent of {extent} skips a cell");
+            }
+            let narrowest = share(extent, MIN_PANEL_WIDTH_PCT);
+            let widest = share(extent, MAX_PANEL_WIDTH_PCT);
+            for cells in 1..narrowest {
+                let pct = pct_for_cells(cells, extent);
+                assert_eq!(pct, MIN_PANEL_WIDTH_PCT, "{cells} cells of {extent}");
+            }
+            for cells in widest + 1..=extent {
+                let pct = pct_for_cells(cells, extent);
+                assert_eq!(pct, MAX_PANEL_WIDTH_PCT, "{cells} cells of {extent}");
+            }
+            for cells in narrowest..=widest {
                 let pct = pct_for_cells(cells, extent);
                 let reopened = share(extent, pct);
                 if let Some(at) = reachable.iter().position(|&c| c == cells) {
@@ -305,7 +325,7 @@ mod tests {
                     );
                 } else {
                     let nearest = reachable.iter().filter(|&&c| c < cells).max();
-                    assert!(extent > 100, "{cells} of {extent} has no percent");
+                    assert!(skips, "{cells} of {extent} has no percent");
                     assert_eq!(Some(&reopened), nearest, "{cells} cells of {extent}");
                 }
             }
