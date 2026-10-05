@@ -73,6 +73,8 @@ or float over it. One key moves all four between the two.
 view answers a tiling desktop's window keys: move between windows, zoom one,
 open the tree or the palette. On a desktop that already owns those keys,
 view keeps to leader keys. See [`docs/keymaps.md`](docs/keymaps.md).
+Every key and command is on one page in
+[`docs/cheatsheet.md`](docs/cheatsheet.md).
 
 **See what a key just did.** `<leader>fk` opens a log of each mapping as it
 fires: the key, whose mapping it is, and the mapping of yours it took the
