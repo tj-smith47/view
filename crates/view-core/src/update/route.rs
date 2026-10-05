@@ -180,32 +180,6 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
         let _ = model.engine.messages.dismiss_answered_prompt();
         model.dirty = true;
     }
-    // <Esc> closes a picker sitting directly on top of the stack.
-    // Checked here, ahead of the focus match below, so a picker
-    // buried under a still-open prompt (the stacking rule a modal
-    // prompt keeps its focus, see `OverlayKind::Picker`'s doc) never
-    // sees this: `focused_overlay_mut` names the prompt in that case,
-    // not the picker, and the pattern below simply does not match.
-    if notation == "<Esc>"
-        && matches!(
-            model.focused_overlay_mut().map(|ov| &ov.kind),
-            Some(OverlayKind::Picker(_))
-        )
-    {
-        model.pop_focused_overlay();
-        // without this the closed picker stays on screen until some
-        // unrelated event repaints: the paint loop's `if model.dirty`
-        // gate is the only repaint trigger, and popping an overlay
-        // produces no engine redraw to trip it
-        model.dirty = true;
-        // tells the matcher worker to drop its live Session so a
-        // Files scan still walking a huge tree does not keep
-        // running unobserved -- see Effect::PickerClose's doc; the
-        // session-replacement path in the worker only fires on a
-        // later query for a different source, which closing here
-        // may never produce
-        return vec![Effect::PickerClose];
-    }
     match model.focus() {
         // `native_pane_focus()` reads nvim's own cursor grid, and the
         // palette carries no grid of its own to put that cursor on,

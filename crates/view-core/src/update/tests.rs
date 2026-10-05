@@ -17655,6 +17655,46 @@ fn a_file_opened_from_the_tree_overlay_closes_it_and_holds_the_keys_behind_it() 
     assert_eq!(sent_inputs(&released), ["x"], "{released:?}");
 }
 
+/// A picker opened while a windowed sidebar holds the cursor opens its file
+/// in the window entered before the sidebar's, for each sidebar kind, and
+/// over an ordinary window in that window.
+#[test]
+fn a_file_chosen_over_a_windowed_sidebar_opens_in_the_window_before_it() {
+    let cases = [
+        ("tree", focused_windowed_tree as fn() -> Model, true),
+        ("notifications", focused_windowed_notifications, true),
+        ("agent", focused_windowed_agent, true),
+        ("no sidebar", model, false),
+    ];
+    for (name, start, previous) in cases {
+        let mut m = start();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                generation: None,
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        let generation = m.picker_mut().expect("the picker opens").generation();
+        let _ = update(
+            &mut m,
+            Msg::PickerResults {
+                generation,
+                items: vec![crate::native::picker::PickerItem::new("a.rs")],
+            },
+        );
+        let effects = update(&mut m, key("<CR>"));
+        let sent = effects.iter().find_map(|effect| match effect {
+            Effect::Rpc(RpcCall::OpenPicked {
+                previous_window, ..
+            }) => Some(*previous_window),
+            _ => None,
+        });
+        assert_eq!(sent, Some(previous), "{name}: {effects:?}");
+    }
+}
+
 #[test]
 fn a_windowed_tree_edge_drag_moves_its_share_and_its_window() {
     let mut m = focused_windowed_tree();

@@ -930,15 +930,24 @@ fn body(kind: &LayerKind, text_width: u16, height: u16) -> Option<Body> {
     }
 }
 
+/// The rows above `view.top` are left out, so [`lay_out`] scrolls the rest
+/// only when the selection would leave the window.
 fn picker_body(view: &PickerView) -> Body {
+    let top = view.selected.map_or(0, |selected| view.top.min(selected));
     Body {
         title: view.title.clone(),
         header: vec![Line::Text(plain_spans(format!(
             "{PROMPT_MARK} {}",
             view.query
         )))],
-        items: view.rows.iter().cloned().map(Line::Text).collect(),
-        selected: view.selected,
+        items: view
+            .rows
+            .iter()
+            .skip(top)
+            .cloned()
+            .map(Line::Text)
+            .collect(),
+        selected: view.selected.map(|selected| selected - top),
         in_view: None,
         header_keep_tail: false,
         header_first: false,

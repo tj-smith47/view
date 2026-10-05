@@ -424,6 +424,39 @@ fn a_selection_below_the_window_scrolls_it_into_view_by_the_smallest_step() {
     assert_eq!(scrolled.selected, Some(4));
 }
 
+/// A list scrolled to row 6 keeps showing from there while the selection
+/// moves up to it, and follows the selection above it.
+#[test]
+fn a_scrolled_list_stays_put_while_the_selection_moves_within_it() {
+    let many: Vec<String> = (0..20).map(|i| format!("row-{i:02}")).collect();
+    let kind = |selected: usize| {
+        let mut view = PickerView::new("Files")
+            .with_rows(many.clone())
+            .with_selected(selected);
+        view.top = 6;
+        LayerKind::Picker(view)
+    };
+    let within = rows(20, 6, &kind(6), BorderSet::ASCII);
+    assert!(
+        line_text(&within.lines[3]).contains("> row-06"),
+        "{:?}",
+        within.lines
+    );
+    assert!(
+        line_text(&within.lines[4]).contains("row-07"),
+        "{:?}",
+        within.lines
+    );
+    assert_eq!(within.selected, Some(3));
+
+    let above = rows(20, 6, &kind(4), BorderSet::ASCII);
+    assert!(
+        line_text(&above.lines[3]).contains("> row-04"),
+        "{:?}",
+        above.lines
+    );
+}
+
 #[test]
 fn a_selection_past_the_end_of_the_rows_highlights_nothing() {
     let kind = LayerKind::Picker(

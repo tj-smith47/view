@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use super::views::{PickerView, Span, StyleRole};
+use super::views::{shown_from, PickerView, Span, StyleRole};
 
 /// The next generation [`PickerState::open`] or [`PickerState::edit_query`]
 /// will hand out. Starts at `1`: `0` is reserved as "no query has ever been
@@ -38,6 +38,10 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 fn next_generation() -> u64 {
     NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
+
+/// How many results the picker lists. The matcher sends one more when it
+/// has one, so a set cut here reads as cut (`200+`) and not as the end.
+pub const RESULT_ROWS: u32 = 200;
 
 /// What a picker session searches.
 #[non_exhaustive]
@@ -174,6 +178,14 @@ pub struct PickerState {
     generation: u64,
     items: Vec<PickerItem>,
     selected: usize,
+    /// Whether the matcher found more than [`RESULT_ROWS`] results.
+    cut: bool,
+    /// Whether the person moved the selection since the query last changed,
+    /// so results still arriving keep it on the result they moved to.
+    moved: bool,
+    /// The first result row the list shows, moved only when the selection
+    /// would leave the rows shown.
+    top: usize,
     /// The generation stamped on the most recent preview request this
     /// session issued (RPC or disk-fallback) -- a fresh preview counter
     /// rather than reusing `generation`, since a query result landing does
@@ -275,6 +287,9 @@ impl PickerState {
             generation: next_generation(),
             items: Vec::new(),
             selected: 0,
+            cut: false,
+            moved: false,
+            top: 0,
             preview_generation: 0,
             preview_path: None,
             preview_first: 1,
@@ -348,6 +363,8 @@ impl PickerState {
     fn requery(&mut self) -> u64 {
         self.generation = next_generation();
         self.selected = 0;
+        self.moved = false;
+        self.top = 0;
         self.generation
     }
 
@@ -355,9 +372,20 @@ impl PickerState {
     /// a later query has since superseded it -- the identical hazard
     /// `HlTable::probe_generation`'s doc names, at far higher frequency (see
     /// this module's doc).
-    pub fn apply_results(&mut self, generation: u64, items: Vec<PickerItem>) {
+    ///
+    /// A selection the person moved stays on its result wherever the new
+    /// set ranks it, and on the same row when the set no longer holds it.
+    pub fn apply_results(&mut self, generation: u64, mut items: Vec<PickerItem>) {
         if generation != self.generation {
             return;
+        }
+        let rows = usize::try_from(RESULT_ROWS).unwrap_or(usize::MAX);
+        self.cut = items.len() > rows;
+        items.truncate(rows);
+        let chosen = self.items.get(self.selected).filter(|_| self.moved);
+        if let Some(at) = chosen.and_then(|chosen| items.iter().position(|item| same(item, chosen)))
+        {
+            self.selected = at;
         }
         self.items = items;
         if self.selected >= self.items.len() {
@@ -399,7 +427,14 @@ impl PickerState {
         let next = self.selected.saturating_add_signed(delta).min(last);
         let moved = next != self.selected;
         self.selected = next;
+        self.moved |= moved;
         moved
+    }
+
+    /// Scrolls the list just far enough that the selection stands in the
+    /// `rows` result rows shown.
+    pub fn keep_in_view(&mut self, rows: usize) {
+        self.top = shown_from(self.top, self.selected, rows);
     }
 
     /// What opening the selected candidate reaches, or `None` with no
@@ -540,6 +575,11 @@ impl PickerState {
         let selected_line = self.items.get(self.selected).and_then(|item| item.line);
         let line_in_flight =
             marked.is_none() && selected_line.is_some() && self.applied_path.is_some();
+        let title = if self.cut {
+            format!("{title} {RESULT_ROWS}+")
+        } else {
+            title.to_string()
+        };
         let mut view = PickerView::new(title)
             .with_query(self.query.clone())
             .with_span_rows(rows)
@@ -553,8 +593,15 @@ impl PickerState {
         if !self.items.is_empty() {
             view = view.with_selected(self.selected);
         }
+        view.top = self.top;
         view
     }
+}
+
+/// Whether `a` and `b` are the same result, whatever the query matched in
+/// either.
+fn same(a: &PickerItem, b: &PickerItem) -> bool {
+    a.label == b.label && a.path == b.path && a.line == b.line && a.buffer == b.buffer
 }
 
 /// Joins `root` and `rel` as a path and renders it back to a `String` for

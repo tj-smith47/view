@@ -723,7 +723,11 @@ fn render_dvr_keys() -> String {
 /// [`render_history_table`] is.
 #[cfg(test)]
 fn render_picker_keys() -> String {
-    render_overlay_table(crate::update::picker_keys::PICKER_KEYS)
+    let keys: Vec<(&str, &str)> = crate::update::picker_keys::PICKER_KEYS
+        .iter()
+        .map(|&(key, _, does)| (key, does))
+        .collect();
+    render_overlay_table(&keys)
 }
 
 /// A table of keys an overlay answers itself, one `(key, does)` row each.

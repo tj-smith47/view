@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use super::PICKER_KEYS;
+use super::{PickerAction, PICKER_KEYS};
 use crate::events::UiEvent;
 use crate::model::{Model, OverlayKind};
 use crate::msg::{Effect, Key, Msg, OpenIn, RpcCall};
@@ -18,7 +18,11 @@ fn press(m: &mut Model, notation: &str) -> Vec<Effect> {
 
 /// A model with the picker open on `verb`'s source, holding `items`.
 fn picker_with(verb: &str, items: Vec<PickerItem>) -> Model {
-    let mut m = Model::new();
+    picker_in(Model::new(), verb, items)
+}
+
+/// `m` with the picker open on `verb`'s source, holding `items`.
+fn picker_in(mut m: Model, verb: &str, items: Vec<PickerItem>) -> Model {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
@@ -377,17 +381,131 @@ fn the_picker_keys_reach_a_prompt_stacked_over_it() {
 }
 
 /// The walk behind `PICKER_KEYS`: every key it documents, pressed on a
-/// picker whose selection has a result on either side, changes something.
+/// picker with a query typed and a result on either side of the selection,
+/// does what its row says, and only `<BS>` asks the matcher for anything.
 #[test]
 fn every_documented_picker_key_answers_a_real_keystroke() {
-    for (key, what) in PICKER_KEYS {
+    for &(key, action, what) in PICKER_KEYS {
+        let mut m = files();
+        let _ = press(&mut m, "a");
+        let generation = m.picker_mut().unwrap().generation();
+        let _ = update(
+            &mut m,
+            Msg::PickerResults {
+                generation,
+                items: vec![
+                    PickerItem::new("a.rs"),
+                    PickerItem::new("b.rs"),
+                    PickerItem::new("c.rs"),
+                ],
+            },
+        );
+        let _ = press(&mut m, "<Down>");
+        let effects = press(&mut m, key);
+        let queried = effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PickerQuery { .. }));
+        assert_eq!(
+            queried,
+            action == PickerAction::Erase,
+            "`{key}` ({what}): {effects:?}"
+        );
+        let done = match action {
+            PickerAction::Move(delta) => {
+                selected(&m) == Some(1usize.saturating_add_signed(delta))
+            }
+            PickerAction::Open(how) => effects.iter().any(|effect| {
+                matches!(effect, Effect::Rpc(RpcCall::OpenPicked { how: h, .. }) if *h == how)
+            }),
+            PickerAction::Erase => m.picker_mut().unwrap().query().is_empty(),
+            PickerAction::Close => !picker_open(&m),
+        };
+        assert!(done, "`{key}` ({what}) did not do it: {effects:?}");
+    }
+}
+
+/// A key that is neither in the table nor a character leaves the picker
+/// as it was and asks the matcher for nothing.
+#[test]
+fn a_key_that_types_nothing_does_nothing() {
+    for key in ["<Tab>", "<Left>", "<Right>", "<PageDown>", "<F5>"] {
         let mut m = files();
         let _ = press(&mut m, "<Down>");
         m.dirty = false;
         let effects = press(&mut m, key);
-        assert!(
-            !effects.is_empty() || m.dirty,
-            "`{key}` ({what}) is documented but does nothing when pressed"
-        );
+        assert!(effects.is_empty(), "{key}: {effects:?}");
+        assert_eq!(selected(&m), Some(1), "{key}");
+        assert!(!m.dirty, "{key}");
     }
+}
+
+/// Results still arriving for the same query keep the selection on the
+/// result the person moved to, and on its row once that result is gone.
+#[test]
+fn the_selection_follows_its_result_while_more_arrive() {
+    let mut m = files();
+    let generation = m.picker_mut().unwrap().generation();
+    let _ = press(&mut m, "<Down>");
+    let streamed = |labels: &[&str]| Msg::PickerResults {
+        generation,
+        items: labels.iter().map(|label| PickerItem::new(*label)).collect(),
+    };
+    let _ = update(&mut m, streamed(&["z.rs", "a.rs", "y.rs", "b.rs", "c.rs"]));
+    assert_eq!(selected(&m), Some(3), "b.rs moved to row 3");
+    let _ = update(&mut m, streamed(&["z.rs", "a.rs", "y.rs", "c.rs", "d.rs"]));
+    assert_eq!(selected(&m), Some(3), "b.rs gone: the row stays");
+}
+
+/// Before any move the selection stays on the top row, whatever arrives.
+#[test]
+fn an_unmoved_selection_stays_on_the_top_row() {
+    let mut m = files();
+    let generation = m.picker_mut().unwrap().generation();
+    let _ = update(
+        &mut m,
+        Msg::PickerResults {
+            generation,
+            items: vec![PickerItem::new("z.rs"), PickerItem::new("a.rs")],
+        },
+    );
+    assert_eq!(selected(&m), Some(0));
+}
+
+/// A result set cut at the row limit says so in the title.
+#[test]
+fn a_cut_result_set_says_so() {
+    let rows = usize::try_from(crate::native::picker::RESULT_ROWS).unwrap();
+    let many = (0..=rows)
+        .map(|i| PickerItem::new(format!("f{i}.rs")))
+        .collect();
+    let mut m = picker_with("files", many);
+    let view = m.picker_mut().unwrap().view();
+    assert_eq!(view.title, format!("Files {rows}+"));
+    assert_eq!(view.rows.len(), rows);
+
+    let mut m = picker_with("files", vec![PickerItem::new("a.rs")]);
+    assert_eq!(m.picker_mut().unwrap().view().title, "Files");
+}
+
+/// After scrolling down, `<Up>` moves the highlight within the rows shown,
+/// and the list scrolls only once it would leave them.
+#[test]
+fn up_after_scrolling_moves_within_the_rows_shown() {
+    let many = (0..60)
+        .map(|i| PickerItem::new(format!("f{i}.rs")))
+        .collect();
+    let mut m = picker_in(Model::with_term_size(80, 24), "files", many);
+    let rows = super::list_rows(&m);
+    assert!(rows > 2, "a list of {rows} rows");
+    for _ in 0..rows + 5 {
+        let _ = press(&mut m, "<Down>");
+    }
+    let top = m.picker_mut().unwrap().view().top;
+    assert_eq!(top, 6, "the list scrolled to keep the selection shown");
+    let _ = press(&mut m, "<Up>");
+    assert_eq!(m.picker_mut().unwrap().view().top, top, "<Up> scrolled");
+    for _ in 0..rows {
+        let _ = press(&mut m, "<Up>");
+    }
+    assert_eq!(m.picker_mut().unwrap().view().top, 4);
 }

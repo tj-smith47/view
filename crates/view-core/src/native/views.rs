@@ -358,6 +358,16 @@ pub struct PickerView {
     /// [`Self::preview_line`] is `None`: the line it showed last, kept while
     /// a window around the new line of the same file is read.
     pub preview_anchor: Option<usize>,
+    /// The first candidate row the list shows when the selection stands
+    /// among the rows from it; see [`shown_from`].
+    pub top: usize,
+}
+
+/// The first of `rows` list rows shown, starting from `top` and moved just
+/// far enough that row `selected` stands among them.
+#[must_use]
+pub fn shown_from(top: usize, selected: usize, rows: usize) -> usize {
+    top.min(selected).max((selected + 1).saturating_sub(rows))
 }
 
 impl PickerView {

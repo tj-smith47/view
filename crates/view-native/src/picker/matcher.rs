@@ -28,11 +28,11 @@ use view_core::sink::MsgSink;
 
 use crate::picker::sources;
 
-/// How many ranked rows the worker streams per `Msg::PickerResults`: enough
-/// for the picker overlay's own row budget, small enough that copying the
-/// ranked slice off nucleo's snapshot on every tick stays cheap even while
-/// a large `Files` scan is still running.
-const STREAM_ROWS: u32 = 200;
+/// How many ranked rows the worker streams per `Msg::PickerResults`: the
+/// rows the picker lists and one more, which tells it the set was cut.
+/// Small enough that copying the ranked slice off nucleo's snapshot on
+/// every tick stays cheap even while a large `Files` scan is still running.
+const STREAM_ROWS: u32 = view_core::native::picker::RESULT_ROWS + 1;
 
 /// How long one `Nucleo::tick` may block waiting for matcher/scan progress
 /// before the worker checks its request channel again for a newer,
