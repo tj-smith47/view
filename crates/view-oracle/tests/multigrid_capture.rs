@@ -166,12 +166,12 @@ impl RawUi {
     /// its own pipes.
     ///
     /// The argument list is `--embed` plus [`EngineConfig::isolated`]'s own
-    /// `--clean -n`, and the environment is that config's inspectable
-    /// `env_plan` applied entry by entry, so the child's isolation is the
-    /// one every other live driver here gets. It omits the one thing
-    /// `Engine::spawn` adds on top, the swap-recovery `--cmd` guard, which
-    /// has nothing to answer for in a run that opens no file: every buffer
-    /// this script creates is unnamed or scratch.
+    /// `--clean -n --cmd "set updatecount=0"`, and the environment is that
+    /// config's inspectable `env_plan` applied entry by entry, so the child's
+    /// isolation is the one every other live driver here gets. It omits the
+    /// one thing `Engine::spawn` adds on top, the swap-recovery `--cmd`
+    /// guard, which has nothing to answer for in a run that opens no file:
+    /// every buffer this script creates is unnamed or scratch.
     fn spawn(surfaces: &[&str]) -> Self {
         let cfg = EngineConfig::isolated();
         view_engine::env::prepare_empty_search_path().unwrap();

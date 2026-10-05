@@ -30,7 +30,9 @@ pub fn open_regular_file(path: &Path) -> std::io::Result<std::fs::File> {
     // a path swapped for a pipe or a device after the check above would
     // block a plain open with no end; O_NONBLOCK has no effect on reading a
     // regular file, and O_NOCTTY keeps a swapped-in tty from becoming the
-    // controlling terminal
+    // controlling terminal. A swapped-in pipe or device is still opened
+    // once, without blocking, before the fstat below refuses it, so it can
+    // complete one waiting writer's open or run a driver's open
     #[cfg(unix)]
     let file = std::fs::File::from(rustix::fs::open(
         path,

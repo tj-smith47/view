@@ -684,7 +684,12 @@ pub(super) fn reopen_after_restart(model: &mut Model) -> Vec<Effect> {
 /// value, a later overlay resize of the sibling would read that stale
 /// number and step from it, silently discarding the share this sync just
 /// gave it the moment the sibling floats.
-fn sync_stacked_siblings(model: &mut Model, resized: NativeSurface, anchor: Anchor, size: u16) {
+pub(super) fn sync_stacked_siblings(
+    model: &mut Model,
+    resized: NativeSurface,
+    anchor: Anchor,
+    size: u16,
+) {
     for surface in NativeSurface::ALL {
         if surface == resized || !model.surfaces.windowed(surface) {
             continue;
@@ -736,12 +741,17 @@ pub(super) fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
 /// its windows in, along the axis its anchor sizes: columns for a left or
 /// right edge, rows for a top or bottom one. `None` while it has no
 /// window.
-pub(super) fn window_size_call(model: &Model, surface: NativeSurface, pct: u16) -> Option<Effect> {
+pub(super) fn window_size_call(
+    model: &mut Model,
+    surface: NativeSurface,
+    pct: u16,
+) -> Option<Effect> {
     let win = model.engine.grids().native_window(surface)?;
     let anchor = model.surfaces.layout(surface).anchor;
     let vertical = WinSplit::for_anchor(anchor).is_vertical();
     let (columns, rows) = model.engine.grids().global().size();
     let cells = crate::native::geometry::share(if vertical { columns } else { rows }, pct).max(1);
+    model.surfaces.ask_size(surface, cells);
     Some(Effect::Rpc(RpcCall::SetWindowSize {
         win: win.0,
         width: vertical.then_some(cells),
@@ -870,6 +880,18 @@ pub(super) fn open_native_window(
     enter: bool,
 ) -> RpcCall {
     let layout = model.surfaces.layout(surface);
+    // the open sizes the edge's whole column to this share, so a sidebar
+    // already standing there takes it too
+    let occupied = NativeSurface::ALL.into_iter().any(|other| {
+        other != surface
+            && model.surfaces.windowed(other)
+            && model.surfaces.layout(other).anchor == layout.anchor
+            && (model.surfaces.pending_open(other)
+                || model.engine.grids().native_window(other).is_some())
+    });
+    if occupied {
+        sync_stacked_siblings(model, surface, layout.anchor, layout.size);
+    }
     RpcCall::OpenNativeWindow {
         surface,
         split: WinSplit::for_anchor(layout.anchor),

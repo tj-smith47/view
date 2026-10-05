@@ -194,6 +194,61 @@ struct Painted {
     new_layout: bool,
 }
 
+/// Launches view in tiles on a scratch file holding `text`, under the
+/// `view.toml` that `config` writes from the scratch paths, recording its
+/// output, and waits until `shown` is on the screen.
+fn launch(
+    name: &str,
+    text: &str,
+    config: impl FnOnce(&common::ScratchPaths) -> String,
+    shown: &str,
+) -> (common::ScratchPaths, PtySession) {
+    let paths = common::ScratchPaths::new(name);
+    std::fs::write(&paths.scratch, text).unwrap();
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.cwd(paths.scratch.parent().unwrap());
+    cmd.args(["--panes", "tiles"]);
+    cmd.arg(paths.scratch.file_name().unwrap());
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    let toml = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
+    std::fs::write(toml, config(&paths)).unwrap();
+    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, POLICY).unwrap();
+    session.record_raw_output_up_to(64 << 20);
+    assert!(
+        session.wait_for(shown, BUDGET),
+        "{name}: view never showed the file; screen:\n{}",
+        session.screen()
+    );
+    (paths, session)
+}
+
+/// The `[ai]` table that runs the stub agent. Its second argument only
+/// holds a turn nobody starts here.
+fn stub_agent(paths: &common::ScratchPaths) -> String {
+    let stub = common::built_bin("view-ai", "view-ai-stub-agent", &["test-support"]);
+    let resume = paths.isolated_home.join("resume");
+    format!(
+        "[ai]\nagent = [{:?}, {:?}]\n",
+        stub.to_string_lossy(),
+        resume.to_string_lossy()
+    )
+}
+
+/// Dismisses launch notices until `settled` reads the screen. A launch
+/// notice is a frame of its own standing over a tile.
+fn settle(session: &mut PtySession, what: &str, mut settled: impl FnMut(&vt100::Screen) -> bool) {
+    let mut dismissed = 0;
+    while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), &mut settled) {
+        assert!(
+            dismissed < 8,
+            "{what} never settled; screen:\n{}",
+            session.screen()
+        );
+        session.send(b"\x1b:View notifications dismiss\r").unwrap();
+        dismissed += 1;
+    }
+}
+
 /// Blocks until the recording ends where a painted frame ends, so a replay
 /// cut there holds no half of one.
 fn settle_on_a_frame_boundary(session: &mut PtySession) {
@@ -331,23 +386,13 @@ fn resize_and_replay(
 /// the look `gaps` names.
 fn resize_under(gaps: bool) {
     let look = if gaps { "gapped" } else { "gapless" };
-    let paths = common::ScratchPaths::new(&format!("tiles-resize-{look}"));
     let line = "#".repeat(400);
     let text: Vec<&str> = std::iter::repeat_n(line.as_str(), 80).collect();
-    std::fs::write(&paths.scratch, text.join("\n") + "\n").unwrap();
-    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
-    cmd.cwd(paths.scratch.parent().unwrap());
-    cmd.args(["--panes", "tiles"]);
-    cmd.arg(paths.scratch.file_name().unwrap());
-    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
-    let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
-    std::fs::write(config, format!("[ui]\ngaps = {gaps}\n")).unwrap();
-    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, POLICY).unwrap();
-    session.record_raw_output_up_to(64 << 20);
-    assert!(
-        session.wait_for("####", BUDGET),
-        "{look}: view never showed the file; screen:\n{}",
-        session.screen()
+    let (_paths, mut session) = launch(
+        &format!("tiles-resize-{look}"),
+        &(text.join("\n") + "\n"),
+        |_| format!("[ui]\ngaps = {gaps}\n"),
+        "####",
     );
 
     session.send(b"\x1b:set nowrap | vsplit\r").unwrap();
@@ -356,18 +401,11 @@ fn resize_under(gaps: bool) {
     // left in the global grid
     let handler = format!("wincmd = | sleep {}m | ", HANDLER.as_millis());
     session.send(mark_resizes(&handler).as_bytes()).unwrap();
-    // the launch notices stand over a tile until dismissed
-    let settled = |screen: &vt100::Screen| mismatch(screen, COLS, ROWS).is_none();
-    let mut dismissed = 0;
-    while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), settled) {
-        assert!(
-            dismissed < 8,
-            "{look}: the two tiles never settled before the resize; screen:\n{}",
-            session.screen()
-        );
-        session.send(b"\x1b:View notifications dismiss\r").unwrap();
-        dismissed += 1;
-    }
+    settle(
+        &mut session,
+        &format!("{look}: the two tiles before the resize"),
+        |screen| mismatch(screen, COLS, ROWS).is_none(),
+    );
     let before = session.with_screen(|screen| frames(screen, COLS, ROWS));
 
     let mut term = vt100::Parser::new(ROWS, COLS, 0);
@@ -473,48 +511,20 @@ fn wraps_beside_the_panel(screen: &vt100::Screen, cols: u16, rows: u16) -> Optio
 /// panel, which the paint tests read.
 fn panel_beside_the_tiles(gaps: bool) {
     let look = if gaps { "gapped" } else { "gapless" };
-    let paths = common::ScratchPaths::new(&format!("tiles-resize-panel-{look}"));
     let line = "#".repeat(400);
     let text: Vec<&str> = std::iter::repeat_n(line.as_str(), 80).collect();
-    std::fs::write(&paths.scratch, text.join("\n") + "\n").unwrap();
-    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
-    cmd.cwd(paths.scratch.parent().unwrap());
-    cmd.args(["--panes", "tiles"]);
-    cmd.arg(paths.scratch.file_name().unwrap());
-    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
-    let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
-    let stub = common::built_bin("view-ai", "view-ai-stub-agent", &["test-support"]);
-    // the stub's second argument only holds a turn nobody starts here
-    let resume = paths.isolated_home.join("resume");
-    std::fs::write(
-        config,
-        format!(
-            "[ui]\ngaps = {gaps}\n\n[ai]\nagent = [{:?}, {:?}]\n",
-            stub.to_string_lossy(),
-            resume.to_string_lossy()
-        ),
-    )
-    .unwrap();
-    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, POLICY).unwrap();
-    session.record_raw_output_up_to(64 << 20);
-    assert!(
-        session.wait_for("####", BUDGET),
-        "{look} panel: view never showed the file; screen:\n{}",
-        session.screen()
+    let (_paths, mut session) = launch(
+        &format!("tiles-resize-panel-{look}"),
+        &(text.join("\n") + "\n"),
+        |paths| format!("[ui]\ngaps = {gaps}\n\n{}", stub_agent(paths)),
+        "####",
     );
     session.send(b"\x1b:set nowrap | vsplit\r").unwrap();
-    // a launch notice is a frame of its own standing over a tile
-    let settled = |screen: &vt100::Screen| mismatch(screen, COLS, ROWS).is_none();
-    let mut dismissed = 0;
-    while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), settled) {
-        assert!(
-            dismissed < 8,
-            "{look} panel: the two tiles never settled; screen:\n{}",
-            session.screen()
-        );
-        session.send(b"\x1b:View notifications dismiss\r").unwrap();
-        dismissed += 1;
-    }
+    settle(
+        &mut session,
+        &format!("{look} panel: the two tiles"),
+        |screen| mismatch(screen, COLS, ROWS).is_none(),
+    );
     session.send(b"\x1b:View ai open\r").unwrap();
     assert!(
         session.wait_for("Trust ", BUDGET),
@@ -604,35 +614,20 @@ fn span(frame: Frame) -> u16 {
 /// sidebar spans the same share of the columns nvim lays its windows in at
 /// every size as it did at launch, to the cell its share rounds to.
 fn windowed_sidebar_keeps_its_share(sidebar: Sidebar) {
-    let paths = common::ScratchPaths::new(&format!("tiles-resize-windowed-{sidebar:?}"));
-    std::fs::write(&paths.scratch, "####\n").unwrap();
-    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
-    cmd.cwd(paths.scratch.parent().unwrap());
-    cmd.args(["--panes", "tiles"]);
-    cmd.arg(paths.scratch.file_name().unwrap());
-    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
-    let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
-    let stub = common::built_bin("view-ai", "view-ai-stub-agent", &["test-support"]);
-    let resume = paths.isolated_home.join("resume");
     let (surface, open) = match sidebar {
         Sidebar::Agent => ("agent", "\x1b:View ai open\r"),
         Sidebar::Tree => ("tree", "\x1b:View tree\r"),
     };
-    std::fs::write(
-        config,
-        format!(
-            "[ui]\ngaps = true\n\n[ai]\nagent = [{:?}, {:?}]\n\n\
-             [ui.surfaces.{surface}]\nplacement = \"windowed\"\n",
-            stub.to_string_lossy(),
-            resume.to_string_lossy()
-        ),
-    )
-    .unwrap();
-    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, POLICY).unwrap();
-    assert!(
-        session.wait_for("####", BUDGET),
-        "windowed {surface}: view never showed the file; screen:\n{}",
-        session.screen()
+    let (_paths, mut session) = launch(
+        &format!("tiles-resize-windowed-{sidebar:?}"),
+        "####\n",
+        |paths| {
+            format!(
+                "[ui]\ngaps = true\n\n{}\n[ui.surfaces.{surface}]\nplacement = \"windowed\"\n",
+                stub_agent(paths)
+            )
+        },
+        "####",
     );
     session.send(b"\x1b:vsplit\r").unwrap();
     session.send(open.as_bytes()).unwrap();
@@ -657,21 +652,14 @@ fn windowed_sidebar_keeps_its_share(sidebar: Sidebar) {
         );
         session.send(b"\r").unwrap();
     }
-    // a launch notice is a frame of its own standing over a tile
-    let settled = |screen: &vt100::Screen| {
-        let frames = frames(screen, COLS, ROWS);
-        frames.len() == 3 && frames.iter().all(|frame| frame.top == frames[0].top)
-    };
-    let mut dismissed = 0;
-    while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), settled) {
-        assert!(
-            dismissed < 8,
-            "windowed {surface}: the tiles and the sidebar never settled; screen:\n{}",
-            session.screen()
-        );
-        session.send(b"\x1b:View notifications dismiss\r").unwrap();
-        dismissed += 1;
-    }
+    settle(
+        &mut session,
+        &format!("windowed {surface}: the tiles and the sidebar"),
+        |screen| {
+            let frames = frames(screen, COLS, ROWS);
+            frames.len() == 3 && frames.iter().all(|frame| frame.top == frames[0].top)
+        },
+    );
     // the prompt typed above starts the session, and the stub names itself
     // once it is up, after the panel's tile was titled with the configured
     // command
@@ -737,37 +725,17 @@ fn text_beside_the_tree(screen: &vt100::Screen, cols: u16, rows: u16) -> Option<
 /// buffer from the first column, inside the frame it closes beside the
 /// tree, at every size.
 fn tree_beside_the_tiles() {
-    let paths = common::ScratchPaths::new("tiles-resize-tree");
     let line = format!("@{}", "#".repeat(399));
     let text: Vec<&str> = std::iter::repeat_n(line.as_str(), 80).collect();
-    std::fs::write(&paths.scratch, text.join("\n") + "\n").unwrap();
-    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
-    cmd.cwd(paths.scratch.parent().unwrap());
-    cmd.args(["--panes", "tiles"]);
-    cmd.arg(paths.scratch.file_name().unwrap());
-    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
-    let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
-    std::fs::write(config, "[ui]\ngaps = true\n").unwrap();
-    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, POLICY).unwrap();
-    session.record_raw_output_up_to(64 << 20);
-    assert!(
-        session.wait_for("@###", BUDGET),
-        "tree: view never showed the file; screen:\n{}",
-        session.screen()
+    let (_paths, mut session) = launch(
+        "tiles-resize-tree",
+        &(text.join("\n") + "\n"),
+        |_| "[ui]\ngaps = true\n".to_string(),
+        "@###",
     );
     session.send(b"\x1b:set nowrap | vsplit\r").unwrap();
-    // a launch notice is a frame of its own standing over a tile
     let settled = |screen: &vt100::Screen| text_beside_the_tree(screen, COLS, ROWS).is_none();
-    let mut dismissed = 0;
-    while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), settled) {
-        assert!(
-            dismissed < 8,
-            "tree: the two tiles never settled; screen:\n{}",
-            session.screen()
-        );
-        session.send(b"\x1b:View notifications dismiss\r").unwrap();
-        dismissed += 1;
-    }
+    settle(&mut session, "tree: the two tiles", settled);
     session.send(b"\x1b:View tree\r").unwrap();
     assert!(
         session.wait_for_screen(BUDGET, |screen| {
@@ -897,11 +865,21 @@ fn wait_until_held(held: &std::path::Path, count: u32) {
     if read.is_err() {
         // a writer of the test's own completes the reader thread's open, and
         // dropping it hands that read an end of file, so no thread outlives
-        // the test
-        let _ = std::fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
-            .open(held);
+        // the test. The open fails with ENXIO until that thread has reached
+        // its own open
+        let deadline = std::time::Instant::now() + host_deadline(Duration::from_secs(1));
+        while std::time::Instant::now() < deadline {
+            let opened = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+                .open(held);
+            match opened {
+                Err(e) if e.raw_os_error() == Some(nix::errno::Errno::ENXIO as i32) => {
+                    std::thread::sleep(host_deadline(Duration::from_millis(10)));
+                }
+                _ => break,
+            }
+        }
     }
     assert_eq!(
         read,
@@ -916,23 +894,13 @@ fn wait_until_held(held: &std::path::Path, count: u32) {
 /// shrinking tile vacates included.
 fn wrapped_text_stays_inside_its_frame(gaps: bool) {
     let look = if gaps { "gapped" } else { "gapless" };
-    let paths = common::ScratchPaths::new(&format!("tiles-resize-wrap-{look}"));
     let digits: String = (0..400).map(wrapped_digit).collect();
     let text: Vec<&str> = std::iter::repeat_n(digits.as_str(), 80).collect();
-    std::fs::write(&paths.scratch, text.join("\n") + "\n").unwrap();
-    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
-    cmd.cwd(paths.scratch.parent().unwrap());
-    cmd.args(["--panes", "tiles"]);
-    cmd.arg(paths.scratch.file_name().unwrap());
-    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
-    let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
-    std::fs::write(config, format!("[ui]\ngaps = {gaps}\n")).unwrap();
-    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, POLICY).unwrap();
-    session.record_raw_output_up_to(64 << 20);
-    assert!(
-        session.wait_for("01234567", BUDGET),
-        "{look} wrap: view never showed the file; screen:\n{}",
-        session.screen()
+    let (paths, mut session) = launch(
+        &format!("tiles-resize-wrap-{look}"),
+        &(text.join("\n") + "\n"),
+        |_| format!("[ui]\ngaps = {gaps}\n"),
+        "01234567",
     );
     session.send(b"\x1b:set wrap | vsplit\r").unwrap();
     // the handler holds nvim short of the grid resize until the test has
@@ -947,23 +915,17 @@ fn wrapped_text_stays_inside_its_frame(gaps: bool) {
         held.display()
     );
     session.send(mark_resizes(&handler).as_bytes()).unwrap();
-    // a launch notice and the command line are frames of their own; the
-    // split has landed once two frames stand side by side
-    let settled = |screen: &vt100::Screen| {
-        let frames = frames(screen, COLS, ROWS);
-        matches!(frames.as_slice(), [a, b] if a.top == b.top && a.bottom == b.bottom)
-            && strays(screen, COLS, ROWS).is_none()
-    };
-    let mut dismissed = 0;
-    while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), settled) {
-        assert!(
-            dismissed < 8,
-            "{look} wrap: the two tiles never settled before the resize; screen:\n{}",
-            session.screen()
-        );
-        session.send(b"\x1b:View notifications dismiss\r").unwrap();
-        dismissed += 1;
-    }
+    // the command line is a frame of its own too; the split has landed once
+    // two frames stand side by side
+    settle(
+        &mut session,
+        &format!("{look} wrap: the two tiles before the resize"),
+        |screen| {
+            let frames = frames(screen, COLS, ROWS);
+            matches!(frames.as_slice(), [a, b] if a.top == b.top && a.bottom == b.bottom)
+                && strays(screen, COLS, ROWS).is_none()
+        },
+    );
     // the replay starts at the session's first byte, so a cell no frame
     // after the resize repaints keeps what it showed before it
     let mut term = vt100::Parser::new(ROWS, COLS, 0);

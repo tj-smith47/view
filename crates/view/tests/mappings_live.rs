@@ -532,6 +532,21 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
         "accept,accept_all,leave,next,prev,rediff,reject,reject_all",
         "and every verb it answers"
     );
+    assert_eq!(
+        session.eval("join(getcompletion('View ai ', 'cmdline'), ',')"),
+        "close,dismiss,focus,open,toggle",
+        "every ai form the dispatch answers"
+    );
+    assert_eq!(
+        session.eval("join(getcompletion('View ui panes ', 'cmdline'), ',')"),
+        "auto,nvim,tiles",
+        "and the words a form takes after its verb"
+    );
+    assert_eq!(
+        session.eval("join(getcompletion('View keys profile e', 'cmdline'), ',')"),
+        "editor",
+        "matched against what is typed"
+    );
 
     session.engine.handle.input(":View picker grep\r").unwrap();
     session.eval("1");
@@ -689,8 +704,13 @@ fn send(session: &Session, effects: &[Effect]) {
     }
 }
 
-/// Applies every message nvim has already sent, which the runtime's one
-/// channel puts ahead of a key typed now.
+/// Applies every message nvim has already sent, ahead of a key typed now.
+///
+/// The non-unix runtime reads one channel, so it folds in this order. The
+/// unix loop drains the terminal only while that channel is empty and
+/// folds the drained keys first, so keys that arrive in the same wakeup as
+/// a batch already received are folded ahead of it. That order folds keys
+/// under an older reading, which only adds holds.
 fn caught_up(session: &Session, model: &mut Model) {
     while let Ok(received) = session.rx.try_recv() {
         let msgs = dispatched(session, received);

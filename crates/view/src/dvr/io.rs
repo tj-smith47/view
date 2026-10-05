@@ -433,6 +433,21 @@ fn write_paced(
     }
 }
 
+/// The names `dir` holds, sorted, leaving out the `._` sidecar macOS
+/// writes beside every file on a volume with no extended attributes (FAT,
+/// exFAT).
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(super) fn listed(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with("._"))
+        .collect();
+    names.sort();
+    names
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -552,12 +567,7 @@ mod tests {
     }
 
     fn left_in(dir: &ScratchDir) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        names
+        listed(dir.path())
     }
 
     fn hard_link(part: &Path, path: &Path) -> io::Result<()> {
@@ -608,6 +618,15 @@ mod tests {
         let want = clip_bytes(&mut theirs);
         let other = dir.join(".a.vdvr.0.part");
         std::fs::write(&other, &want).unwrap();
+        let probe = dir.join("probe");
+        match std::fs::hard_link(&other, &probe) {
+            Err(e) if lacks_hard_links(&e) => {
+                eprintln!("skipped: this volume refuses a hard link ({e})");
+                return;
+            }
+            linked => linked.unwrap(),
+        }
+        std::fs::remove_file(&probe).unwrap();
         let reply = paced(job(&mut ours, &path), || {
             publish(&other, &path, hard_link).unwrap();
         });
@@ -807,7 +826,7 @@ mod tests {
         let missing = dir.join("no-such-dir").join("b.vdvr");
         io.apply(export(&mut ring, missing, &held));
         assert!(matches!(reply(&rx), DvrIoReply::Failed { .. }));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(left_in(&dir).len(), 1);
     }
 
     #[test]

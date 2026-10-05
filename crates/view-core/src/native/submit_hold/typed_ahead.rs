@@ -38,9 +38,10 @@ use crate::native::speculate::{is_cmdline_mode, SpecStamp, CMDLINE_LITERAL_KEYS}
 /// behind a key that may change what nvim reads next, before [`settle`]
 /// reads that key as answered. Every key does, apart from a character typed
 /// while view reads insert, replace or a command line, so typed prose never
-/// arms. A hold missed sends the query
-/// into the buffer as commands, and one armed in error ends on a settled
-/// mode report out of normal mode or on its bound.
+/// arms. A hold missed sends the query into the buffer as commands. One
+/// armed in error ends on a settled mode report out of normal mode, on the
+/// next input once the mode last reported is out of normal mode
+/// ([`super::released_by_input`]), or on its bound.
 pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     let mode = model.engine.mode.current.as_str();
     let normal = mode == "normal";

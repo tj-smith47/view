@@ -94,10 +94,8 @@ impl DvrIoReply {
     #[must_use]
     pub fn notice(&self) -> Option<String> {
         Some(match self {
-            Self::DiskChecked { .. } | Self::ClipLoaded { left_out: 0, .. } => return None,
-            Self::ClipLoaded { path, left_out } => format!(
-                "view: DVR clip {path}: {left_out} oldest frames past [dvr] max_mb were not loaded"
-            ),
+            // the frames a clip left out are on its bar while it is shown
+            Self::DiskChecked { .. } | Self::ClipLoaded { .. } => return None,
             Self::Exported { path, cut: 0 } => format!("view: DVR clip written: {path}"),
             Self::Exported { path, cut } => format!(
                 "view: DVR clip written: {path} ({cut} symbols cut to {CLIP_FIELD_MAX} bytes)"
@@ -258,6 +256,8 @@ pub struct Dvr {
     replay: Vec<Msg>,
     /// The clip the scrub shows in place of the recording.
     clip: Option<String>,
+    /// How many of the clip's oldest frames did not fit `[dvr] max_mb`.
+    clip_left_out: usize,
     /// A clip opened that the loop has not shown yet.
     clip_opened: bool,
     /// The clip being read, until its frames or its failure arrive.
@@ -352,17 +352,19 @@ impl Dvr {
     pub(crate) fn close_scrub(&mut self) -> bool {
         self.pending_moves.clear();
         self.clip = None;
+        self.clip_left_out = 0;
         self.cancel_ask();
         self.scrub.take().is_some()
     }
 
     /// Shows the clip at `path`, read already, in the scrub on its newest
-    /// frame.
-    pub(crate) fn open_clip(&mut self, path: String) {
+    /// frame, `left_out` of its oldest frames left behind.
+    pub(crate) fn open_clip(&mut self, path: String, left_out: usize) {
         self.scrub = Some(self.scrub.unwrap_or(self.last_frame));
         self.pending_moves.clear();
         self.pending_moves.push_back(ScrubStep::Newest);
         self.clip = Some(path);
+        self.clip_left_out = left_out;
         self.clip_opened = true;
         self.loading = None;
     }
@@ -383,6 +385,13 @@ impl Dvr {
     #[must_use]
     pub fn clip(&self) -> Option<&str> {
         self.clip.as_deref()
+    }
+
+    /// How many of the shown clip's oldest frames did not fit `[dvr]
+    /// max_mb`, zero while no clip is shown.
+    #[must_use]
+    pub fn clip_left_out(&self) -> usize {
+        self.clip_left_out
     }
 
     /// Whether a clip was opened since the last call, once.

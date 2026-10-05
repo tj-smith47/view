@@ -581,6 +581,7 @@ pub(super) fn on_float_placed(
     col: i64,
     (zindex, anchor): (u32, surfaces::FloatAnchor),
 ) -> Vec<Effect> {
+    model.surface_conflicts.float_placed(win, grid);
     if model.surface_conflicts.is_complaint(win) {
         // a window being animated sends a placement per step, and it is the
         // same window at every one of them
@@ -3139,6 +3140,24 @@ mod tests {
         assert_eq!(model.surface_conflicts.claimed(), 0, "GridDestroy");
     }
 
+    /// The float scan names a window and no grid, and the close names a grid
+    /// and no window, so a scan's claim takes the grid its window was placed
+    /// on.
+    #[test]
+    fn a_closed_window_takes_a_claim_that_named_no_grid() {
+        let mut model = notifier_session();
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![sized(10, 18, 2), float_at(10, 1007, 2, 2)]),
+        );
+        assert!(model.surface_conflicts.claim_complaint(1007, None));
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![UiEvent::WinClose { grid: 10 }]),
+        );
+        assert_eq!(model.surface_conflicts.claimed(), 0);
+    }
+
     /// The suspected half of the ruling: before the probe answers, "no
     /// claimant is known" and "no claimant is loaded" are the same answer,
     /// and a plugin whose timer fires at a fixed offset from `VimEnter` can
@@ -3187,6 +3206,19 @@ mod tests {
             painted(&benign, 7),
             "and the window paints from the next frame"
         );
+    }
+
+    /// A completion menu pushed against the right edge by text typed near
+    /// it, in the message area's corner before the reading arrives, waits
+    /// for that reading and paints from the frame after one naming nobody.
+    #[test]
+    fn a_completion_menu_over_the_corner_waits_for_the_reading_and_no_longer() {
+        let mut model = captured_session();
+        let _ = update(&mut model, Msg::Redraw(vec![sized(7, 24, 8)]));
+        let _ = step_float(&mut model, 7, 1008, 1, 76);
+        assert!(!painted(&model, 7), "held while no reading has arrived");
+        sink_read(&mut model, false);
+        assert!(painted(&model, 7), "and shown once it names nobody");
     }
 
     /// The restart arms a probe of its own, so the replacement is back

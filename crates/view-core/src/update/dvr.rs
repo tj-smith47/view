@@ -149,8 +149,8 @@ fn branch(model: &mut Model, at: u64) -> Vec<Effect> {
 /// from the DVR's file work carries.
 pub(super) fn on_io(model: &mut Model, reply: &DvrIoReply) -> Vec<Effect> {
     match reply {
-        DvrIoReply::ClipLoaded { path, .. } => {
-            model.dvr.open_clip(path.clone());
+        DvrIoReply::ClipLoaded { path, left_out } => {
+            model.dvr.open_clip(path.clone(), *left_out);
             model.dirty = true;
         }
         DvrIoReply::Failed { verb: "play", .. } => model.dvr.end_load(),
@@ -948,18 +948,18 @@ mod tests {
         };
         let _ = update(&mut m, Msg::DvrIo(cut));
         assert_eq!(m.dvr.clip(), Some("/w/a.vdvr"));
+        assert_eq!(m.dvr.clip_left_out(), 40, "the clip's bar has no count");
+        // a notice waits under the clip's frame and shows once it closes
         assert!(
-            told_once(
-                &m,
-                "view: DVR clip /w/a.vdvr: 40 oldest frames past [dvr] max_mb \
-                 were not loaded"
-            ),
+            !format!("{:?}", m.engine.messages.entries).contains("not loaded"),
             "{:?}",
             m.engine.messages.entries
         );
+        let _ = update(&mut m, invoke_msg("close"));
+        assert_eq!(m.dvr.clip_left_out(), 0, "the count outlived its clip");
         let mut whole = recorded();
         let _ = update(&mut whole, loaded("/w/a.vdvr"));
-        assert!(!format!("{:?}", whole.engine.messages.entries).contains("not loaded"));
+        assert_eq!(whole.dvr.clip_left_out(), 0);
     }
 
     #[test]

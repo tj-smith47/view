@@ -70,10 +70,12 @@ pub(super) fn set_sidebar_share(
 }
 
 /// Sizes each windowed sidebar again from its share of the grid nvim has
-/// just laid its windows in, for the sidebars whose axis `columns` or
-/// `rows` says changed. nvim keeps a sidebar's window at its cells across a
-/// terminal resize, so a sidebar sized once kept them on every later size.
-pub(super) fn reshare_windowed_sidebars(model: &Model, columns: bool, rows: bool) -> Vec<Effect> {
+/// just laid its windows in, for the sidebars whose axis changed from
+/// `before`, the grid's size ahead of the resize. nvim keeps a sidebar's
+/// window at its cells across a terminal resize, so a sidebar sized once
+/// kept them on every later size.
+pub(super) fn reshare_windowed_sidebars(model: &mut Model, before: (u16, u16)) -> Vec<Effect> {
+    let after = model.engine.grids().global().size();
     let mut sized: Vec<crate::native::geometry::Anchor> = Vec::new();
     let mut effects = Vec::new();
     for surface in [
@@ -83,20 +85,93 @@ pub(super) fn reshare_windowed_sidebars(model: &Model, columns: bool, rows: bool
     ] {
         let layout = model.surfaces.layout(surface);
         let vertical = crate::msg::WinSplit::for_anchor(layout.anchor).is_vertical();
+        let (from, to) = if vertical {
+            (before.0, after.0)
+        } else {
+            (before.1, after.1)
+        };
         // sidebars stacked on one edge share one column or row, which one
         // request sizes
-        if !model.surfaces.windowed(surface)
-            || !(if vertical { columns } else { rows })
-            || sized.contains(&layout.anchor)
-        {
+        if !model.surfaces.windowed(surface) || from == to || sized.contains(&layout.anchor) {
             continue;
         }
-        if let Some(call) = super::surfaces::window_size_call(model, surface, layout.size) {
+        let Some(win) = model.engine.grids().native_window(surface) else {
+            continue;
+        };
+        keep_size_set_in_nvim(model, surface, win, from);
+        let size = model.surfaces.layout(surface).size;
+        if let Some(call) = super::surfaces::window_size_call(model, surface, size) {
             sized.push(layout.anchor);
             effects.push(call);
         }
     }
     effects
+}
+
+/// Takes the cells `surface`'s window stands at as its share of `extent`,
+/// the grid's size along its axis that those cells were laid out in, where
+/// they are not the cells its share gives. Only nvim's side sizes a window
+/// to other cells (`:vertical resize`, `<C-w>|`, a plugin), and a size
+/// view asked for and has not seen reported yet is skipped.
+fn keep_size_set_in_nvim(
+    model: &mut Model,
+    surface: NativeSurface,
+    win: crate::events::WinHandle,
+    extent: u16,
+) {
+    let layout = model.surfaces.layout(surface);
+    let Some((_, _, width, height)) = model.engine.grids().window_slot(win) else {
+        return;
+    };
+    let cells = if crate::msg::WinSplit::for_anchor(layout.anchor).is_vertical() {
+        width
+    } else {
+        height
+    };
+    if extent == 0
+        || model.surfaces.awaits_size(surface)
+        || cells == crate::native::geometry::share(extent, layout.size).max(1)
+    {
+        return;
+    }
+    let scaled = u32::from(cells) * 100;
+    let pct = clamp_panel_width(i64::from(
+        (scaled + u32::from(extent) / 2) / u32::from(extent),
+    ));
+    match surface {
+        NativeSurface::Tree => {
+            model.set_tree_width(pct);
+        }
+        NativeSurface::Agent => {
+            model.set_ai_panel_width(pct);
+        }
+        NativeSurface::Notifications | NativeSurface::Palette => {}
+    }
+    model.surfaces.set_layout(
+        surface,
+        crate::native::geometry::SurfaceLayout::new(layout.placement, layout.anchor, pct),
+    );
+    super::surfaces::sync_stacked_siblings(model, surface, layout.anchor, pct);
+}
+
+/// Notes the cells a placement of `grid`'s window reports, which answer a
+/// size view asked for when they are those cells.
+pub(super) fn note_sidebar_placed(model: &mut Model, grid: crate::grid::registry::GridId) {
+    let Some(surface) = model.engine.grids().native_surface(grid) else {
+        return;
+    };
+    let vertical =
+        crate::msg::WinSplit::for_anchor(model.surfaces.layout(surface).anchor).is_vertical();
+    let slot = model
+        .engine
+        .grids()
+        .native_window(surface)
+        .and_then(|win| model.engine.grids().window_slot(win));
+    if let Some((_, _, width, height)) = slot {
+        model
+            .surfaces
+            .placed_at(surface, if vertical { width } else { height });
+    }
 }
 
 /// What resize mode resizes from where the keyboard is: `Some(None)` for

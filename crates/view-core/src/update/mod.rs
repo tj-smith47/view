@@ -142,7 +142,9 @@ pub fn prepare_branch(model: &mut Model) -> Vec<Effect> {
 
 /// The messages a branch's replay folds now: none until the replacement's
 /// `VimEnter` has attached it, since the takeover there holds each key it
-/// maps until the mapping is in place, then the replay, once.
+/// maps until the mapping is in place, then the replay, once. The takeover's
+/// own hold on input is the runtime's to read, so the runtime folds these
+/// only while its session holds no input.
 #[must_use]
 pub fn due_replay(model: &mut Model) -> Vec<Msg> {
     if !model.dvr.has_replay() || model.awaits_attach() {

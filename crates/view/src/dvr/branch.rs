@@ -51,7 +51,7 @@ pub(crate) fn replace(
 /// folded before view has claimed its mappings is read as nvim's own, so
 /// a picker query replayed behind view's key would reach the buffer.
 pub(crate) fn due_replay(model: &mut Model, native: &NativeSession) -> Vec<Msg> {
-    if native.holds_input() {
+    if !model.dvr.has_replay() || native.holds_input() {
         return Vec::new();
     }
     view_core::update::due_replay(model)

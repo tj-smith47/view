@@ -55,6 +55,11 @@ pub struct SurfaceState {
     /// The surfaces an engine restart closed out of their windows, which
     /// the replacement's `VimEnter` opens again.
     reopen: [bool; 4],
+    /// The cells view last asked nvim to size each surface's window to,
+    /// until a placement of that window reports them. A placement reported
+    /// meanwhile predates the request, so its cells are no width the user
+    /// chose.
+    asked: [Option<u16>; 4],
 }
 
 impl Default for SurfaceState {
@@ -68,6 +73,7 @@ impl Default for SurfaceState {
             generation: [0; 4],
             pending: [false; 4],
             reopen: [false; 4],
+            asked: [None; 4],
         }
     }
 }
@@ -158,7 +164,30 @@ impl SurfaceState {
         let slot = &mut self.generation[surface.index()];
         *slot = slot.wrapping_add(1);
         self.pending[surface.index()] = true;
+        // the open sizes the window from the share itself
+        self.asked[surface.index()] = None;
         *slot
+    }
+
+    /// Notes that view asked nvim to size `surface`'s window to `cells`.
+    pub fn ask_size(&mut self, surface: NativeSurface, cells: u16) {
+        self.asked[surface.index()] = Some(cells);
+    }
+
+    /// Notes a placement of `surface`'s window at `cells`, which answers
+    /// the request for that size.
+    pub fn placed_at(&mut self, surface: NativeSurface, cells: u16) {
+        let asked = &mut self.asked[surface.index()];
+        if *asked == Some(cells) {
+            *asked = None;
+        }
+    }
+
+    /// Whether a size view asked for `surface`'s window has not been
+    /// reported yet.
+    #[must_use]
+    pub fn awaits_size(&self, surface: NativeSurface) -> bool {
+        self.asked[surface.index()].is_some()
     }
 
     /// The generation `surface`'s last window-open carried.

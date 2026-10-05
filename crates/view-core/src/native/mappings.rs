@@ -393,7 +393,23 @@ pub struct CommandForm {
 /// [`REGISTRY_EXEMPT_FEATURES`] entry: both exist to report a key claim and
 /// to carry the off switch that gives the key back, and a form that claims
 /// no key has neither to answer for.
-static COMMAND_ONLY_FORMS: [CommandForm; 14] = [
+static COMMAND_ONLY_FORMS: [CommandForm; 18] = [
+    CommandForm {
+        feature: "ai",
+        verb: "open",
+    },
+    CommandForm {
+        feature: "ai",
+        verb: "focus",
+    },
+    CommandForm {
+        feature: "ai",
+        verb: "close",
+    },
+    CommandForm {
+        feature: "ai",
+        verb: "dismiss",
+    },
     CommandForm {
         feature: "ui",
         verb: "panes",
@@ -456,6 +472,23 @@ static COMMAND_ONLY_FORMS: [CommandForm; 14] = [
 #[must_use]
 pub fn command_only_forms() -> &'static [CommandForm] {
     &COMMAND_ONLY_FORMS
+}
+
+/// The third words of the `:View` forms that take one, as their dispatch
+/// matches them.
+static FORM_ARGUMENTS: [(&str, &str, &[&str]); 2] = [
+    ("ui", "panes", &["tiles", "nvim", "auto"]),
+    ("keys", "profile", &["desktop", "editor", "auto"]),
+];
+
+/// The words `:View <feature> <verb>` takes after the verb, empty for a
+/// form that takes none.
+#[must_use]
+pub fn form_arguments(feature: &str, verb: &str) -> &'static [&'static str] {
+    FORM_ARGUMENTS
+        .iter()
+        .find(|(f, v, _)| *f == feature && *v == verb)
+        .map_or(&[], |(_, _, words)| words)
 }
 
 /// One key a review installs on the buffer it is drawn in, and the verb it
@@ -605,12 +638,22 @@ pub fn invocations() -> Vec<String> {
 }
 
 /// The one-line usage for `:View`, naming the command's shape and every
-/// form it accepts.
+/// form it accepts, with the words a form takes after its verb.
 #[must_use]
 pub fn render_usage() -> String {
+    let forms: Vec<String> = invocations()
+        .into_iter()
+        .map(|form| {
+            let (feature, verb) = form.split_once(' ').unwrap_or((&form, ""));
+            match form_arguments(feature, verb) {
+                [] => form.clone(),
+                words => format!("{form} [{}]", words.join("|")),
+            }
+        })
+        .collect();
     format!(
         ":{COMMAND} needs a feature and a verb. Try: {}",
-        invocations().join(", ")
+        forms.join(", ")
     )
 }
 

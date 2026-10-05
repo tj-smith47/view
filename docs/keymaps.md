@@ -873,7 +873,7 @@ frame keys move through the clip, and `q` returns to the live screen.
 Pressing `b` or `e` in a clip closes it with a notice. Your recording is
 kept while a clip is open. The screen is not recorded until the clip is
 closed. A clip holds up to `[dvr] max_mb` of memory beside your recording.
-A clip longer than that is loaded from its newest frame, and a notice says
+A clip longer than that is loaded from its newest frame, and its bar says
 how many of its oldest frames were left out. Playing a clip closes the one
 open, and a play while a clip is still being read is refused with a notice
 naming that clip.

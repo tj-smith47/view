@@ -19278,6 +19278,13 @@ fn a_terminal_resize_sizes_each_windowed_sidebar_from_its_share() {
             NOTIFICATIONS_WIN,
         ),
     ] {
+        let launch = m.surfaces.layout(surface).size;
+        let _ = update(&mut m, key("<S-Right>"));
+        assert_ne!(
+            m.surfaces.layout(surface).size,
+            launch,
+            "{surface:?}: the resize key stepped no share"
+        );
         let resized = update(
             &mut m,
             Msg::Resized {
@@ -19325,6 +19332,305 @@ fn a_terminal_resize_sizes_each_windowed_sidebar_from_its_share() {
             "{surface:?}: a height change resized a side sidebar's width"
         );
     }
+}
+
+/// A model on an 80x24 grid with each of `sidebars` windowed at its anchor
+/// and share, opened in the order given, each window placed at the cells
+/// its open asked for once that open is answered.
+fn sidebars_open(
+    sidebars: &[(
+        crate::native::geometry::NativeSurface,
+        crate::native::geometry::Anchor,
+        u16,
+    )],
+) -> Model {
+    use crate::native::geometry::{share, NativeSurface, SurfaceLayout, SurfacePlacement};
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width: 80,
+                height: 24,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    let mut placed = Vec::new();
+    for &(surface, anchor, size) in sidebars {
+        m.surfaces.set_layout(
+            surface,
+            SurfaceLayout::new(SurfacePlacement::Windowed, anchor, size),
+        );
+        let (toggle, win, grid) = match surface {
+            NativeSurface::Tree => {
+                m.tree_width_pct = size;
+                (tree_toggle(), TREE_WIN, TREE_GRID)
+            }
+            NativeSurface::Agent => {
+                m.ai_panel_width_pct = size;
+                (agent_toggle(), AGENT_WIN, AGENT_GRID)
+            }
+            _ => (
+                notifications_toggle(),
+                NOTIFICATIONS_WIN,
+                NOTIFICATIONS_GRID,
+            ),
+        };
+        let effects = update(&mut m, toggle);
+        let generation = opened_generation(&effects);
+        let _ = update(
+            &mut m,
+            Msg::NativeWindowOpened {
+                generation,
+                surface,
+                win,
+            },
+        );
+        placed.push((surface, anchor, grid, win));
+        // nvim lays out every window again, each sidebar at its share
+        let mut events = Vec::new();
+        for &(standing, anchor, grid, win) in &placed {
+            let pct = m.surfaces.layout(standing).size;
+            let (width, height) = if crate::msg::WinSplit::for_anchor(anchor).is_vertical() {
+                (u64::from(share(80, pct)), 24)
+            } else {
+                (80, u64::from(share(24, pct)))
+            };
+            events.push(UiEvent::GridResize {
+                grid,
+                width,
+                height,
+            });
+            events.push(UiEvent::WinPos {
+                grid,
+                win,
+                startrow: 0,
+                startcol: 0,
+                width,
+                height,
+            });
+        }
+        events.push(UiEvent::GridCursorGoto {
+            grid,
+            row: 0,
+            col: 0,
+        });
+        events.push(UiEvent::Flush);
+        let _ = update(&mut m, Msg::Redraw(events));
+    }
+    m
+}
+
+/// nvim's grid taking a new size, as a terminal resize ends.
+fn grid_resized(width: u64, height: u64) -> Msg {
+    Msg::Redraw(vec![
+        UiEvent::GridResize {
+            grid: 1,
+            width,
+            height,
+        },
+        UiEvent::Flush,
+    ])
+}
+
+/// Two sidebars stacked in one column are sized by one request.
+#[test]
+fn two_sidebars_on_one_edge_are_sized_by_one_request() {
+    use crate::native::geometry::{Anchor, NativeSurface};
+    let mut m = sidebars_open(&[
+        (NativeSurface::Tree, Anchor::Right, 20),
+        (NativeSurface::Agent, Anchor::Right, 35),
+    ]);
+    let taken = update(&mut m, grid_resized(50, 20));
+    assert_eq!(
+        window_widths(&taken),
+        [(
+            TREE_WIN.0,
+            Some(crate::native::geometry::share(50, 35)),
+            None
+        )],
+        "one request sizes the edge's column, at the share it stands at"
+    );
+}
+
+/// Two sidebars a launch opens on one edge at two shares, both opens sent
+/// before either is answered: the second open sizes the column, so both
+/// take its share. Each answer copied its own share to the other, which
+/// left both at the first one's share while the column stood at the
+/// second's, and the next terminal resize moved the column.
+#[test]
+fn a_second_sidebar_opened_on_an_edge_gives_the_first_its_share() {
+    use crate::native::geometry::{share, Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(&mut m, grid_resized(80, 24));
+    for (surface, size) in [(NativeSurface::Tree, 20), (NativeSurface::Agent, 35)] {
+        m.surfaces.set_layout(
+            surface,
+            SurfaceLayout::new(SurfacePlacement::Windowed, Anchor::Right, size),
+        );
+    }
+    m.tree_width_pct = 20;
+    m.ai_panel_width_pct = 35;
+    let tree = opened_generation(&update(&mut m, tree_toggle()));
+    let agent = opened_generation(&update(&mut m, agent_toggle()));
+    for (generation, surface, win) in [
+        (tree, NativeSurface::Tree, TREE_WIN),
+        (agent, NativeSurface::Agent, AGENT_WIN),
+    ] {
+        let _ = update(
+            &mut m,
+            Msg::NativeWindowOpened {
+                generation,
+                surface,
+                win,
+            },
+        );
+    }
+    assert_eq!(m.surfaces.layout(NativeSurface::Tree).size, 35);
+    assert_eq!(m.surfaces.layout(NativeSurface::Agent).size, 35);
+    assert_eq!(m.tree_width_pct, 35);
+    let column = u64::from(share(80, 35));
+    let mut placed = Vec::new();
+    for (grid, win) in [(TREE_GRID, TREE_WIN), (AGENT_GRID, AGENT_WIN)] {
+        placed.push(UiEvent::GridResize {
+            grid,
+            width: column,
+            height: 12,
+        });
+        placed.push(UiEvent::WinPos {
+            grid,
+            win,
+            startrow: 0,
+            startcol: 80 - column,
+            width: column,
+            height: 12,
+        });
+    }
+    placed.push(UiEvent::Flush);
+    let _ = update(&mut m, Msg::Redraw(placed));
+    let taken = update(&mut m, grid_resized(50, 20));
+    assert_eq!(
+        window_widths(&taken),
+        [(TREE_WIN.0, Some(share(50, 35)), None)]
+    );
+}
+
+/// One request per edge whose axis changed: two sidebars on two edges are
+/// two requests, and a bottom stream is sized in rows on a change of
+/// height and left alone on a change of width.
+#[test]
+fn a_terminal_resize_sizes_one_window_per_edge_along_its_axis() {
+    use crate::native::geometry::{share, Anchor, NativeSurface};
+    let mut m = sidebars_open(&[
+        (NativeSurface::Tree, Anchor::Left, 20),
+        (NativeSurface::Agent, Anchor::Right, 35),
+    ]);
+    let taken = update(&mut m, grid_resized(50, 24));
+    assert_eq!(
+        window_widths(&taken),
+        [
+            (TREE_WIN.0, Some(share(50, 20)), None),
+            (AGENT_WIN.0, Some(share(50, 35)), None),
+        ]
+    );
+
+    let mut m = sidebars_open(&[(NativeSurface::Notifications, Anchor::Bottom, 30)]);
+    let wider = update(&mut m, grid_resized(100, 24));
+    assert_eq!(window_widths(&wider), [], "a width change sized a band");
+    let shorter = update(&mut m, grid_resized(100, 20));
+    assert_eq!(
+        window_widths(&shorter),
+        [(NOTIFICATIONS_WIN.0, None, Some(share(20, 30)))]
+    );
+}
+
+/// A width set on nvim's side (`:vertical resize`, `<C-w>|`, a plugin) is
+/// the share a terminal resize keeps. Read from view's share alone, the
+/// next resize put the sidebar back at the width view had last set.
+#[test]
+fn a_width_set_in_nvim_is_the_share_a_terminal_resize_keeps() {
+    let mut m = sidebars_open(&[(
+        crate::native::geometry::NativeSurface::Agent,
+        crate::native::geometry::Anchor::Right,
+        30,
+    )]);
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinPos {
+                grid: AGENT_GRID,
+                win: AGENT_WIN,
+                startrow: 0,
+                startcol: 40,
+                width: 40,
+                height: 24,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    let taken = update(&mut m, grid_resized(100, 24));
+    assert_eq!(window_widths(&taken), [(AGENT_WIN.0, Some(50), None)]);
+    assert_eq!(m.ai_panel_width_pct, 50);
+}
+
+/// A size view asked for and nvim has not reported yet is no width the
+/// user set: a terminal resize landing between the request and its answer
+/// sizes from the share view asked for.
+#[test]
+fn a_size_still_on_its_way_to_nvim_is_no_width_set_in_nvim() {
+    let mut m = sidebars_open(&[(
+        crate::native::geometry::NativeSurface::Agent,
+        crate::native::geometry::Anchor::Right,
+        30,
+    )]);
+    let _ = update(&mut m, key("<S-Right>"));
+    let stepped = m.ai_panel_width_pct;
+    assert_ne!(stepped, 30, "the resize key stepped no share");
+    let taken = update(&mut m, grid_resized(100, 24));
+    assert_eq!(
+        window_widths(&taken),
+        [(
+            AGENT_WIN.0,
+            Some(crate::native::geometry::share(100, stepped)),
+            None
+        )]
+    );
+}
+
+/// A sidebar on another tabpage when the grid changes size is sized where
+/// it stands: nvim hides its window and view keeps it, and nvim sets the
+/// width of a window on another tabpage.
+#[test]
+fn a_sidebar_on_another_tabpage_is_sized_while_it_is_away() {
+    let mut m = sidebars_open(&[(
+        crate::native::geometry::NativeSurface::Agent,
+        crate::native::geometry::Anchor::Right,
+        30,
+    )]);
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::WinHide { grid: AGENT_GRID }, UiEvent::Flush]),
+    );
+    let away = update(&mut m, grid_resized(50, 20));
+    assert_eq!(
+        window_widths(&away),
+        [(
+            AGENT_WIN.0,
+            Some(crate::native::geometry::share(50, 30)),
+            None
+        )]
+    );
 }
 
 /// The percent `[ui.surfaces.agent]` would read back after a restart moves
@@ -19478,6 +19784,130 @@ fn every_registered_feature_invoke_has_a_dispatch_handler() {
             "({feature}, {verb}) has no dispatch handler: it fell through to the \
              no-handler notice"
         );
+    }
+}
+
+/// The quoted words that follow each `after` in `text`.
+fn quoted_after(text: &str, after: &str) -> Vec<String> {
+    text.match_indices(after)
+        .filter_map(|(at, _)| text[at + after.len()..].split('"').next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The text of `source` from `from` to the first `to` after it.
+fn source_between<'a>(source: &'a str, from: &str, to: &str) -> &'a str {
+    let start = source.find(from).expect("the walk's start marker");
+    let rest = &source[start..];
+    &rest[..rest.find(to).expect("the walk's end marker")]
+}
+
+/// The words a `match` arm's string patterns name: `"w" =>`, `"w" if` and
+/// `Some("w")`.
+fn arm_words(body: &str) -> Vec<String> {
+    let mut words = quoted_after(body, "Some(\"");
+    for line in body.lines().map(str::trim_start) {
+        if let Some(rest) = line.strip_prefix('"') {
+            let word = rest.split('"').next().unwrap_or_default();
+            let tail = rest[word.len()..].trim_start_matches('"').trim_start();
+            if tail.starts_with("=>") || tail.starts_with("if ") {
+                words.push(word.to_owned());
+            }
+        }
+    }
+    words
+}
+
+/// Every form the `:View` dispatch answers, read off the dispatch's own
+/// source, is one the command completes and its usage line names. The
+/// completion and the usage are both built from the mappings tables, so a
+/// verb with an arm here and no row there is a form only a reader of this
+/// crate could type. A form is `feature verb`, or `feature verb word` for
+/// the third word a verb's own dispatch matches on.
+///
+/// Read: the `feature == ".." && verb == ".."` conditions and the window
+/// verbs in `update/mod.rs`, `keys_invoke`'s two levels, `look::invoke`,
+/// `dvr::invoke` and the review's `VERBS`. The `to_tabpage_` verbs are
+/// parsed off a prefix, so no literal names them.
+#[test]
+fn every_form_the_view_dispatch_answers_is_completed_and_in_the_usage() {
+    use crate::native::mappings::{command_only_forms, default_maps, form_arguments};
+    use std::collections::BTreeSet;
+
+    let dispatch = include_str!("mod.rs");
+    let mut forms: BTreeSet<(String, String, Option<String>)> = BTreeSet::new();
+    let mut add = |feature: &str, verb: &str, word: Option<String>| {
+        forms.insert((feature.to_owned(), verb.to_owned(), word));
+    };
+    let invoke = source_between(dispatch, "Msg::FeatureInvoke { feature", "\n        }\n");
+    for line in invoke.lines() {
+        for feature in quoted_after(line, "feature == \"") {
+            for verb in quoted_after(line, "verb == \"") {
+                add(&feature, &verb, None);
+            }
+        }
+    }
+    let window = source_between(invoke, "if feature == \"window\"", "\n            }\n");
+    for verb in arm_words(window) {
+        add("window", &verb, None);
+    }
+    let keys = source_between(dispatch, "fn keys_invoke", "\n}\n");
+    let (verbs, profiles) = keys.split_once("let profile").expect("the profile half");
+    for verb in arm_words(verbs) {
+        add("keys", &verb, None);
+    }
+    for word in arm_words(profiles) {
+        add("keys", "profile", Some(word));
+    }
+    let look = source_between(include_str!("look.rs"), "pub(crate) fn invoke", "\n}\n");
+    add("ui", "panes", None);
+    assert!(
+        look.contains("Some(\"panes\")"),
+        "look::invoke's verb moved"
+    );
+    for word in arm_words(look).into_iter().filter(|w| w != "panes") {
+        add("ui", "panes", Some(word));
+    }
+    let dvr = source_between(include_str!("dvr.rs"), "pub(super) fn invoke", "\n}\n");
+    for verb in arm_words(dvr) {
+        add("dvr", &verb, None);
+    }
+    for verb in super::review::VERBS {
+        add("review", verb, None);
+    }
+    assert!(forms.len() > 20, "the walk read almost nothing: {forms:?}");
+
+    let tabled: BTreeSet<(&str, &str)> = default_maps()
+        .iter()
+        .map(|spec| (spec.feature, spec.verb))
+        .chain(
+            command_only_forms()
+                .iter()
+                .map(|form| (form.feature, form.verb)),
+        )
+        .collect();
+    let usage = crate::native::mappings::render_usage();
+    for (feature, verb, word) in &forms {
+        assert!(
+            tabled.contains(&(feature.as_str(), verb.as_str())),
+            "`:View {feature} {verb}` is answered and never completed"
+        );
+        match word {
+            None => assert!(
+                usage.contains(&format!("{feature} {verb}")),
+                "`:View {feature} {verb}` is missing from the usage: {usage}"
+            ),
+            Some(word) => {
+                assert!(
+                    form_arguments(feature, verb).contains(&word.as_str()),
+                    "`:View {feature} {verb} {word}` is answered and never completed"
+                );
+                assert!(
+                    usage.contains(&format!("{feature} {verb} [")) && usage.contains(word.as_str()),
+                    "`:View {feature} {verb} {word}` is missing from the usage: {usage}"
+                );
+            }
+        }
     }
 }
 

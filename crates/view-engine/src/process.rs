@@ -4844,13 +4844,13 @@ mod tests {
     fn a_spawn_spends_exactly_one_cmd_argument() {
         let cfg = EngineConfig::isolated();
         let command = build_command(&cfg).expect("a local config always builds a command");
-        let cmds = |args: &mut dyn Iterator<Item = &std::ffi::OsStr>| {
+        fn cmd_count<'a>(args: impl Iterator<Item = &'a std::ffi::OsStr>) -> usize {
             args.filter(|arg| *arg == std::ffi::OsStr::new("--cmd"))
                 .count()
-        };
-        let callers = cmds(&mut cfg.extra_args.iter().map(OsString::as_os_str));
+        }
+        let callers = cmd_count(cfg.extra_args.iter().map(OsString::as_os_str));
         assert_eq!(
-            cmds(&mut command.get_args()) - callers,
+            cmd_count(command.get_args()) - callers,
             1,
             "the swap answer must cost the caller one --cmd slot, no more"
         );

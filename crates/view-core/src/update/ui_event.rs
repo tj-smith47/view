@@ -38,12 +38,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 },
             );
             if GridId(grid) == crate::grid::registry::GLOBAL_GRID {
-                let after = model.engine.grids().global().size();
-                effects.extend(super::resize::reshare_windowed_sidebars(
-                    model,
-                    before.0 != after.0,
-                    before.1 != after.1,
-                ));
+                effects.extend(super::resize::reshare_windowed_sidebars(model, before));
             }
             effects
         }
@@ -132,6 +127,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             if let Some(surface) = model.engine.grids().native_surface(grid) {
                 model.surfaces.clear_pending(surface);
             }
+            super::resize::note_sidebar_placed(model, grid);
             super::look::request_for(model, grid)
         }
         UiEvent::WinFloatPos {

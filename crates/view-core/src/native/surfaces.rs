@@ -745,6 +745,10 @@ pub struct SurfaceConflicts {
     /// through the classification a float over a held channel takes at its
     /// placement.
     sink_holds: Vec<(u64, crate::grid::registry::GridId)>,
+    /// The grid each standing float was last placed on, by its window. The
+    /// float scan names a window and no grid, and the close that takes the
+    /// window away names a grid and no window.
+    float_grids: Vec<(u64, crate::grid::registry::GridId)>,
     /// Which engine the deadlines armed this session belong to. A timer
     /// thread sleeping on a dead engine's behalf still wakes, and the
     /// expiry it sends names this value as it was when the deadline was
@@ -986,6 +990,12 @@ impl SurfaceConflicts {
         if self.is_complaint(win) {
             return false;
         }
+        let grid = grid.or_else(|| {
+            self.float_grids
+                .iter()
+                .find(|placed| placed.0 == win)
+                .map(|placed| placed.1)
+        });
         self.complaints.push(Complaint {
             win,
             unconditional: self.startup_window_open(),
@@ -1067,9 +1077,17 @@ impl SurfaceConflicts {
         self.channel_held(Surface::Messages) || !self.sink_read
     }
 
+    /// Notes that `win`'s float was placed on `grid`.
+    pub fn float_placed(&mut self, win: u64, grid: crate::grid::registry::GridId) {
+        self.float_grids
+            .retain(|placed| placed.0 != win && placed.1 != grid);
+        self.float_grids.push((win, grid));
+    }
+
     /// Drops the claim on the float drawn into `grid`, whose window nvim
     /// closed.
     pub fn forget_float(&mut self, grid: crate::grid::registry::GridId) {
+        self.float_grids.retain(|placed| placed.1 != grid);
         self.complaints
             .retain(|complaint| complaint.grid != Some(grid));
     }
@@ -1200,6 +1218,7 @@ impl SurfaceConflicts {
     /// | `complaints` | window handles, and a fresh process issues them from 1000 again: a handle held past the death names one of the replacement's own windows, and the reply to a read of it would file a live window's rows into the history and close it |
     /// | `typed` | the replacement sources the config again, so whatever drew over a surface draws again, and a session that had been typed at would leave those windows stacked beside the re-raised notice |
     /// | `complaint_grace` | a deadline armed against the dead engine's report, and the replacement's own report arms its own |
+    /// | `float_grids` | window handles of the dead process |
     /// | `sink_read`, `sink_holds` | the attach re-reads the message area's replaced global per engine, so the replacement is back inside the window where a float over a native surface is held until that reading lands; the held handles belong to the dead process |
     /// | `generation` | bumped: the dead engine's deadlines are still sleeping in their timer threads, and their expiries must find nobody to answer to |
     /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config draws the same windows -- forgetting it would raise a second notice per window for one conflict |
@@ -1212,6 +1231,7 @@ impl SurfaceConflicts {
         self.complaint_grace = false;
         self.sink_read = false;
         self.sink_holds.clear();
+        self.float_grids.clear();
         self.held.clear();
         self.generation += 1;
     }

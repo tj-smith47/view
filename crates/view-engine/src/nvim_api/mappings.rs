@@ -14,7 +14,8 @@ use rmpv::Value;
 
 use crate::handle::EngineError;
 use view_core::native::mappings::{
-    command_only_forms, default_maps, is_spellable, is_token, MappingSpec, Rhs, COMMAND,
+    command_only_forms, default_maps, form_arguments, is_spellable, is_token, MappingSpec, Rhs,
+    COMMAND,
 };
 
 /// The lua chunk [`EngineHandle::register_mappings`] runs inside nvim,
@@ -475,15 +476,20 @@ end, {
     local at = #words - 1 + ((line:sub(-1) == ' ') and 1 or 0)
     local seen, out = {}, {}
     for _, entry in ipairs(entries) do
-      local word = nil
+      local offered = {}
       if at <= 1 then
-        word = entry.feature
-      elseif entry.feature == words[2] then
-        word = entry.verb
+        offered = { entry.feature }
+      elseif at == 2 and entry.feature == words[2] then
+        offered = { entry.verb }
+      elseif at == 3 and entry.feature == words[2]
+          and entry.verb == words[3] then
+        offered = entry.args or {}
       end
-      if word and not seen[word] and vim.startswith(word, lead) then
-        seen[word] = true
-        out[#out + 1] = word
+      for _, word in ipairs(offered) do
+        if not seen[word] and vim.startswith(word, lead) then
+          seen[word] = true
+          out[#out + 1] = word
+        end
       end
     end
     table.sort(out)
@@ -491,9 +497,11 @@ end, {
   end,
 })";
 
-/// Every feature/verb pair `:View` completes: the keyed entry points and the
-/// command-only forms, whatever this session mapped.
-fn command_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
+/// Every feature/verb pair `:View` completes, with the words the form
+/// takes after its verb: the keyed entry points and the command-only
+/// forms, whatever this session mapped.
+fn command_entries() -> impl Iterator<Item = (&'static str, &'static str, &'static [&'static str])>
+{
     default_maps()
         .iter()
         .map(|spec| (spec.feature, spec.verb))
@@ -502,6 +510,7 @@ fn command_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
                 .iter()
                 .map(|form| (form.feature, form.verb)),
         )
+        .map(|(feature, verb)| (feature, verb, form_arguments(feature, verb)))
 }
 
 /// [`command_entries`] as a Lua table literal, for the startup `--cmd`,
@@ -510,8 +519,18 @@ fn command_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
 /// key, and every compiled-in pair passes it.
 pub(crate) fn command_entries_lua() -> String {
     let rows: Vec<String> = command_entries()
-        .filter(|(feature, verb)| is_token(feature) && is_token(verb))
-        .map(|(feature, verb)| format!("{{ feature = '{feature}', verb = '{verb}' }}"))
+        .filter(|(feature, verb, args)| {
+            is_token(feature) && is_token(verb) && args.iter().all(|arg| is_token(arg))
+        })
+        .map(|(feature, verb, args)| {
+            let args: Vec<String> = args.iter().map(|arg| format!("'{arg}'")).collect();
+            let args = if args.is_empty() {
+                String::new()
+            } else {
+                format!(", args = {{ {} }}", args.join(", "))
+            };
+            format!("{{ feature = '{feature}', verb = '{verb}'{args} }}")
+        })
         .collect();
     format!("{{ {} }}", rows.join(", "))
 }
@@ -597,11 +616,16 @@ pub(crate) fn mapping_args(specs: &[MappingSpec], channel_id: u64) -> Vec<Value>
         })
         .collect();
     let entries = command_entries()
-        .map(|(feature, verb)| {
-            Value::Map(vec![
+        .map(|(feature, verb, args)| {
+            let mut fields = vec![
                 (Value::from("feature"), Value::from(feature)),
                 (Value::from("verb"), Value::from(verb)),
-            ])
+            ];
+            if !args.is_empty() {
+                let args = args.iter().map(|arg| Value::from(*arg)).collect();
+                fields.push((Value::from("args"), Value::Array(args)));
+            }
+            Value::Map(fields)
         })
         .collect();
     vec![

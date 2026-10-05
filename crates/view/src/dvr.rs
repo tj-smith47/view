@@ -325,7 +325,11 @@ impl DvrLoop {
             });
         }
         self.painted = Some(shown);
-        let bar = self.bar(seq, waits, model.dvr.clip(), confirming);
+        let clip = model
+            .dvr
+            .clip()
+            .map(|path| (path, model.dvr.clip_left_out()));
+        let bar = self.bar(seq, waits, clip, confirming);
         Some(Some((seq, bar)))
     }
 
@@ -358,19 +362,30 @@ impl DvrLoop {
     }
 
     /// The scrub bar for frame `seq`: the clip's file name when `clip`
-    /// names one, how far back the frame is and how far back the frames
-    /// reach, then the way out and the keys.
-    fn bar(&self, seq: u64, waiting: bool, clip: Option<&str>, confirming: bool) -> String {
+    /// names one, with how many of its oldest frames were left out, how
+    /// far back the frame is and how far back the frames reach, then the
+    /// way out and the keys.
+    fn bar(
+        &self,
+        seq: u64,
+        waiting: bool,
+        clip: Option<(&str, usize)>,
+        confirming: bool,
+    ) -> String {
         let secs = |s| self.ring.age(s).unwrap_or_default().as_secs_f64();
         let age = secs(seq);
         let reach = secs(self.ring.oldest().unwrap_or(seq));
         let flag = if waiting { WAITING } else { "" };
         let (head, hint) = match clip {
-            Some(path) => {
+            Some((path, left_out)) => {
                 let name = std::path::Path::new(path)
                     .file_name()
                     .map_or_else(|| path.into(), |n| n.to_string_lossy());
-                (format!("CLIP {name}"), CLIP_HINT)
+                let head = match left_out {
+                    0 => format!("CLIP {name}"),
+                    n => format!("CLIP {name} ({n} oldest frames past [dvr] max_mb not loaded)"),
+                };
+                (head, CLIP_HINT)
             }
             None => ("DVR".to_owned(), SCRUB_HINT),
         };
@@ -766,10 +781,27 @@ mod tests {
         let _ = dvr.poll(model);
     }
 
+    /// Every message's text as the person reads it, one per line; a path
+    /// in it stays as displayed, where `Debug` doubles a backslash.
+    fn said(model: &Model) -> String {
+        model
+            .engine
+            .messages
+            .entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .content()
+                    .iter()
+                    .map(|(_, text)| text.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn told(model: &Model, words: &str) -> usize {
-        format!("{:?}", model.engine.messages.entries)
-            .matches(words)
-            .count()
+        said(model).matches(words).count()
     }
 
     #[test]
@@ -842,7 +874,7 @@ mod tests {
                 path.display()
             ))
         );
-        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        let left = io::listed(dir.path());
         assert!(left.is_empty(), "{left:?}");
         drop(gate);
     }
@@ -884,7 +916,7 @@ mod tests {
             .recv_timeout(view_test_support::host_deadline(QUIT_WAIT))
             .unwrap();
         assert!(matches!(reply, DvrIoReply::Failed { .. }), "{reply:?}");
-        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        let left = io::listed(dir.path());
         assert!(left.is_empty(), "{left:?}");
     }
 
@@ -954,7 +986,7 @@ mod tests {
         );
         entered.recv().unwrap();
         drop(dvr);
-        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        let left = io::listed(dir.path());
         assert!(left.is_empty(), "{left:?}");
         drop(gate);
         let cancelled = seen
@@ -1172,7 +1204,7 @@ mod tests {
         ];
         for (path, why) in cases {
             play(&mut model, &mut dvr, &rx, &path);
-            let said = format!("{:?}", model.engine.messages.entries);
+            let said = said(&model);
             let line = format!("DVR play failed: {}", path.display());
             assert!(said.contains(&line), "{said}");
             assert!(said.contains(why), "{why}: {said}");
@@ -1325,16 +1357,14 @@ mod tests {
         assert_eq!(dvr.ring.newest(), Some(40), "the newest end is kept");
         let oldest = dvr.ring.oldest().unwrap();
         assert!(oldest > 1, "the clip was cut, its oldest frame {oldest}");
-        let line = format!(
-            "long.vdvr: {} oldest frames past [dvr] max_mb were not loaded",
+        let bar = dvr.scrub_pass(&mut model).flatten().map(|(_, bar)| bar);
+        let bar = bar.expect("the clip is not shown");
+        let head = format!(
+            "CLIP long.vdvr ({} oldest frames past [dvr] max_mb not loaded)",
             oldest - 1
         );
-        assert_eq!(
-            told(&model, &line),
-            1,
-            "{:?}",
-            model.engine.messages.entries
-        );
+        assert!(bar.starts_with(&head), "{bar}");
+        assert_eq!(told(&model, "not loaded"), 0, "a notice under the clip");
     }
 
     #[test]
@@ -1342,7 +1372,7 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         let dvr = recorded(&mut model);
         assert_eq!(
-            dvr.bar(6, false, Some("/w/clips/a.vdvr"), false),
+            dvr.bar(6, false, Some(("/w/clips/a.vdvr", 0)), false),
             "CLIP a.vdvr  -0.0s of 2.0s  q close  h/l frame  H/L 1s  g/G ends"
         );
         assert!(dvr
