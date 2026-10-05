@@ -800,7 +800,7 @@ separate processes with view interposed on every keystroke and frame.
 |---|---|
 | Engine supervision | The UI survives an engine hang or crash: stall detection, interrupt offer, automatic restart with swap (`-r`) rehydration — a misbehaving plugin cannot take the editor down |
 | Remote editing | Engine spawned over SSH, paint and input local, speculative echo hides link latency (§5.6); clipboard already identical local/remote via OSC52 (§5.3) |
-| Session DVR | Visual scrub/replay of what the screen showed, branch from any point, exportable replay file — over the same keystream+frame recording the oracle uses |
+| Session DVR | Opt-in (`[dvr] enabled`). Scrub back through the painted frames held in a bounded ring, branch a fresh engine from any frame by replaying the recorded input, export the frames and input as a versioned clip file and play it back in view |
 | Key introspector | `:View keys`: which mapping fired, whose it was, what it displaced — live, over the key-claim reporting layer (§5.3) |
 | Image viewing | kitty graphics protocol on the `full` tier (§7), half-block cell fallback below, painted as a native overlay; extends to picker preview and tree hover; the engine keeps the buffer, view supersedes only the paint |
 | Media playback (ruled 2026-08-07; open-dispatch ruled 2026-08-08) | `view file.mp4` / audio: seamless full-terminal handoff to a detected system `mpv` (terminal video output, audio native to mpv; doctor-guided when absent, never bundled), view resumes on exit. Not CLI-only: every open path (CLI arg, tree select, picker accept) runs one shared open-dispatch — the same type detection routing to buffer, image overlay, or media handoff — so selecting a video in the tree plays it (plan 2026-08-09-p5_5-media.md owns the mechanism); composited in-pane playback arrives with the workspace arc (§15.1) |
@@ -996,6 +996,10 @@ desktop_modifier = "auto"  # auto | super | alt -- auto = super where the
 
 [supervision]
 auto_restart = true        # false: surface a dead engine and wait for a manual restart
+
+[dvr]
+enabled = false            # true: record painted frames and input for rewind
+max_mb = 64                # memory the recording holds; oldest frames drop past it
 
 [ai]
 enabled = true
@@ -1214,6 +1218,7 @@ copyable ones (polish).
 | `ToastHistory` scope vs §9's letter (ruled 2026-08-09 at the P4 exit drain) | Keep recording confirm-class entries (`confirm`/`return_prompt`/inputlist-class) to scrollback history alongside the sticky and transient rows, and amend §9's routing table to say so | Narrow the recorder to only what §9's routing table listed: a history that silently omits the confirm prompt the user just answered is the surprising outcome for anyone coming from nvim's `:messages`, and painless migration is the tie-breaker. Coordinator ruling, reported to the user |
 | Browser pane engine (§15.1) | CDP-driven system Chromium via `chromiumoxide`: screencast frames through the native graphics substrate; view owns bindings, hints, theme; browser detected, never bundled | Carbonyl/Carboxyl child process: stalled-upstream Chromium fork, supply-chain risk, UX never view's. Servo embedding: watched as the long-term in-process fit — API unstable and open-web compat incomplete as of 2026-08. Handrolled engine: never |
 | C2 fleet source (2026-10-03) | ACP sessions in this process; the list is a mode of the agent window | A fifth NativeSurface: about 250 sites to touch. Cross-process sources: wait on C1 attach |
+| Session DVR (2026-10) | Records painted frames and the input beside them; a branch replays the input into a replacement engine on the session's own transport; no registry row (exempt `dvr`). Limits: replay reproduces input and never time, so timers, LSP or async replies and `timeoutlen` chords can diverge; a command a timer or autocmd runs with a recorded verb's name during a replay is absorbed as that verb; a replacement engine that has not taken over within 3 s gets the rest of the replay as plain keys, so a replayed picker query can reach the buffer once; frames painted while scrubbing are not recorded; a clip is watchable and is not branchable in another session | Recording redraw batches and replaying them from 0: O(session) per scrub step and a second model of the engine. Freezing a model snapshot at open: scrub reads frames, so there is no model state to freeze |
 
 ## 19. Risks
 
