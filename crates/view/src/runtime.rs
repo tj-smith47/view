@@ -1376,9 +1376,7 @@ pub fn run(
                 return Ok((model, code, dvr));
             }
         }
-        // a branch's replay waits for the replacement's `VimEnter`, whose
-        // takeover holds each key it maps until the mapping is in place
-        for msg in view_core::update::due_replay(&mut model) {
+        for msg in crate::dvr::branch::due_replay(&mut model, follow_ups.native) {
             let stop = || engine_stop(&mut engine);
             if let Some(code) = step(&mut model, &executor, follow_ups, &mut state, stop, msg) {
                 return Ok((model, code, dvr));

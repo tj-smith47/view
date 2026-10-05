@@ -1,9 +1,11 @@
 //! Replaces the editor with one brought to a recorded frame.
 
 use view_core::model::Model;
+use view_core::msg::Msg;
 use view_core::native::dvr::BranchPlan;
 use view_engine::{Engine, EngineConfig};
 
+use crate::native::NativeSession;
 use crate::recovery::{replace_engine, Bound, LoopChannels, Restarted};
 use crate::startup::AttachFailure;
 
@@ -18,8 +20,8 @@ use crate::startup::AttachFailure;
 /// The bound [`crate::recovery::restart_engine`] states: the stop waits up
 /// to the engine's `shutdown_timeout` and the spawn up to its
 /// `handshake_timeout`, on a frame the person asked to stall by confirming.
-/// The replay folds once per recorded input, after the replacement's
-/// `VimEnter`, so the takeover's key hold orders the keys it maps.
+/// The replay folds once per recorded input, once the replacement's
+/// takeover has claimed view's keys ([`due_replay`]).
 pub(crate) fn replace(
     engine: &mut Engine,
     respawn: &dyn Fn(&[String]) -> EngineConfig,
@@ -42,6 +44,17 @@ pub(crate) fn replace(
         model.dvr.branch_failed();
     }
     fresh
+}
+
+/// The messages a branch's replay folds now: none while the replacement's
+/// takeover holds input, then [`view_core::update::due_replay`]'s. A key
+/// folded before view has claimed its mappings is read as nvim's own, so
+/// a picker query replayed behind view's key would reach the buffer.
+pub(crate) fn due_replay(model: &mut Model, native: &NativeSession) -> Vec<Msg> {
+    if native.holds_input() {
+        return Vec::new();
+    }
+    view_core::update::due_replay(model)
 }
 
 #[cfg(test)]
@@ -129,7 +142,7 @@ mod tests {
                     };
                     self.dispatch(executor, msg);
                 }
-                for msg in view_core::update::due_replay(&mut self.model) {
+                for msg in due_replay(&mut self.model, &self.native) {
                     self.dispatch(executor, msg);
                 }
                 if done(self, engine) {
@@ -219,6 +232,21 @@ mod tests {
             bound: Bound<'_>,
             at: u64,
         ) -> Result<Restarted, AttachFailure> {
+            let plan = self.confirm_branch(at);
+            let fresh = replace(
+                engine,
+                respawn,
+                &mut self.model,
+                &self.channels,
+                bound,
+                plan,
+            )?;
+            Ok(self.cut_over(fresh))
+        }
+
+        /// Confirms a branch from frame `at` as a person does, returning
+        /// the plan the confirmation queued.
+        fn confirm_branch(&mut self, at: u64) -> BranchPlan {
             let scrub = Msg::FeatureInvoke {
                 generation: None,
                 feature: "dvr".to_owned(),
@@ -244,21 +272,12 @@ mod tests {
             let _ = view_core::update::update(&mut self.model, checked);
             self.model.note_frame_painted();
             let _ = view_core::update::update(&mut self.model, key("y"));
-            let plan = std::iter::from_fn(|| self.model.dvr.take_request())
+            std::iter::from_fn(|| self.model.dvr.take_request())
                 .find_map(|r| match r {
                     DvrRequest::Branch(plan) => Some(plan),
                     _ => None,
                 })
-                .expect("a confirmed branch is queued");
-            let fresh = replace(
-                engine,
-                respawn,
-                &mut self.model,
-                &self.channels,
-                bound,
-                plan,
-            )?;
-            Ok(self.cut_over(fresh))
+                .expect("a confirmed branch is queued")
         }
 
         /// Hands a replacement what its startup staged, as the loop does
@@ -376,6 +395,31 @@ mod tests {
             rig.model.dvr.dead(),
             std::slice::from_ref(&(at + 1..=rig.frames))
         );
+    }
+
+    /// A staged replay on an attached replacement waits while the
+    /// takeover holds input, and folds once view's keys are claimed.
+    #[test]
+    fn a_replay_waits_for_the_takeover_to_claim_view_keys() {
+        let mut rig = Rig::new();
+        rig.model.engine.mode.current = "normal".to_owned();
+        let x = Msg::Key(Key {
+            notation: "x".to_owned(),
+        });
+        let _ = view_core::update::update(&mut rig.model, x);
+        rig.model.dvr.note_frame(1, 1);
+        let plan = rig.confirm_branch(1);
+        rig.model.dvr.branched(plan.at_frame, plan.replay);
+        rig.model.rearm_attach();
+        let _ = rig.model.takes_attach();
+        let mut taking_over = NativeSession::all_enabled(0, None);
+        let _ = taking_over.follow_up(&mut rig.model, crate::native::Stage::VimEnter);
+        assert!(taking_over.holds_input());
+        assert!(due_replay(&mut rig.model, &taking_over).is_empty());
+        assert!(rig.model.dvr.has_replay());
+        let claimed = NativeSession::all_enabled(0, None);
+        let replay = due_replay(&mut rig.model, &claimed);
+        assert!(format!("{replay:?}").contains("\"x\""), "{replay:?}");
     }
 
     #[test]

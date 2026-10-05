@@ -437,10 +437,21 @@ impl EngineConfig {
     /// source for that keypress. Such a child never exits on its own at
     /// all, on any host, at any speed, and only the force-kill fallback
     /// ends it.
+    ///
+    /// The child writes no swap file from its first command on. Every
+    /// isolated child shares one swap directory under the hermetic home,
+    /// and nvim applies `-n` only after the config has run, so a config
+    /// that edits the unnamed buffer would race every concurrent child for
+    /// one swap name and stop at `E300` or `E303` with the rest unread.
     #[must_use]
     pub fn isolated() -> Self {
         Self {
-            extra_args: vec![OsString::from("--clean"), OsString::from("-n")],
+            extra_args: vec![
+                OsString::from("--clean"),
+                OsString::from("-n"),
+                OsString::from("--cmd"),
+                OsString::from("set updatecount=0"),
+            ],
             hermetic: true,
             ..Self::default()
         }
@@ -4831,13 +4842,15 @@ mod tests {
     /// and a second one spent here would come out of the caller's own budget.
     #[test]
     fn a_spawn_spends_exactly_one_cmd_argument() {
-        let command = build_command(&EngineConfig::isolated())
-            .expect("a local config always builds a command");
+        let cfg = EngineConfig::isolated();
+        let command = build_command(&cfg).expect("a local config always builds a command");
+        let cmds = |args: &mut dyn Iterator<Item = &std::ffi::OsStr>| {
+            args.filter(|arg| *arg == std::ffi::OsStr::new("--cmd"))
+                .count()
+        };
+        let callers = cmds(&mut cfg.extra_args.iter().map(OsString::as_os_str));
         assert_eq!(
-            command
-                .get_args()
-                .filter(|arg| *arg == std::ffi::OsStr::new("--cmd"))
-                .count(),
+            cmds(&mut command.get_args()) - callers,
             1,
             "the swap answer must cost the caller one --cmd slot, no more"
         );

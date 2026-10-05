@@ -481,13 +481,9 @@ fn run(surfaces: &[&str]) -> Transcript {
     for (label, command) in [
         ("tabnew", "tabnew"),
         ("tabclose", "tabclose"),
-        // `noswapfile` alongside the fill: `-n` sets `'updatecount'` only
-        // once a UI has attached, and this buffer was created before that,
-        // so it is still a buffer that would write a swap file into a
-        // hermetic home concurrent runs share
         (
             "fill buffer",
-            "set noswapfile | call setline(1, map(range(1, 200), 'string(v:val)'))",
+            "call setline(1, map(range(1, 200), 'string(v:val)'))",
         ),
         ("scroll", "execute \"normal! \\<C-e>\""),
     ] {

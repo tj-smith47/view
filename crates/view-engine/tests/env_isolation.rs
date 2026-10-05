@@ -540,6 +540,33 @@ fn an_isolated_spawn_establishes_the_directories_its_plan_points_at() {
     drop(engine);
 }
 
+/// A config an isolated child reads writes no swap file. Every isolated
+/// child shares one hermetic home and so one swap directory, and nvim
+/// applies `-n` only once the config has run, so a config that edits the
+/// unnamed buffer raced every concurrent child for the same swap name and
+/// stopped at `E300`/`E303` with the rest of the config unread.
+#[test]
+fn an_isolated_childs_config_runs_with_no_swap_file() {
+    with_prepared_dirs(|| {
+        let init = scratch("no-swap-init.lua");
+        std::fs::write(&init, "vim.g.updatecount_in_config = vim.o.updatecount\n").unwrap();
+        let cfg = EngineConfig::isolated().with_arg("-u").with_arg(&init);
+        let engine = Engine::spawn(cfg).unwrap();
+        // an embedded child sources its config only once a UI attaches,
+        // and answers the eval only once startup is back at its input loop
+        engine.handle.ui_attach(80, 24, &[]).unwrap();
+        let seen = engine
+            .handle
+            .eval_str("get(g:, 'updatecount_in_config', -1)")
+            .unwrap();
+        assert_eq!(
+            seen, "0",
+            "the config ran with 'updatecount' {seen}, so an edit it makes \
+             opens a swap file in the directory every isolated child shares"
+        );
+    });
+}
+
 /// An isolated spawn must *run* the plant refusal against the home its plan
 /// points a child's `HOME` at: the directory existing proves nothing about
 /// who prepared it (see the test above), but only the preparation can
