@@ -744,7 +744,10 @@ mod tests {
         let dir = ScratchDir::new("dvr-export-dangling").unwrap();
         let (part, path) = (dir.join("p"), dir.join("b.vdvr"));
         std::fs::write(&part, b"clip").unwrap();
-        std::os::unix::fs::symlink("nowhere", &path).unwrap();
+        if let Err(e) = std::os::unix::fs::symlink("nowhere", &path) {
+            eprintln!("skipped: this volume refuses a symlink ({e})");
+            return;
+        }
         let noreplace = rename_noreplace(&part, &path).map_err(|e| e.kind());
         let checked = rename_checked(&part, &path).map_err(|e| e.kind());
         for (how, got) in [("noreplace", noreplace), ("checked", checked)] {

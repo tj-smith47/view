@@ -495,7 +495,7 @@ mod tests {
             line(e, 1) == "unsaved"
         });
         engine.handle.eval_str("execute('preserve')").unwrap();
-        assert_eq!(std::fs::read_dir(&swaps).unwrap().count(), 1);
+        assert_eq!(crate::dvr::io::listed(&swaps).len(), 1);
 
         let fresh = rig.branch(
             &mut engine,
