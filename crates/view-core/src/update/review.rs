@@ -195,6 +195,9 @@ pub(super) fn on_buf_write_refused(
 /// status, no cursor, because there is nothing about the review it could
 /// have changed.
 pub(super) fn review_verb(model: &mut Model, verb: &str) -> Vec<Effect> {
+    if super::dvr::replayed_review(model, verb) {
+        return Vec::new();
+    }
     if !VERBS.contains(&verb) {
         model.dirty = true;
         return model

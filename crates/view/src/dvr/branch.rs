@@ -512,10 +512,16 @@ mod tests {
             "no query key reached the buffer"
         );
         assert_eq!(eval(&fresh.engine, "mode()"), "n");
+        // the query keys wait behind the picker's open, so the engine gets
+        // the closing size ahead of them
         let mut expected = logged;
-        expected.push(vec![80, 0, 24, 0]);
+        let held = expected.len() - 3;
+        expected.insert(held, vec![80, 0, 24, 0]);
         let after: Vec<Vec<u8>> = rig.model.dvr.inputs().map(|i| i.body.to_vec()).collect();
-        assert_eq!(after, expected, "the recording, then the closing size");
+        assert_eq!(
+            after, expected,
+            "the recording in the order the engine got it"
+        );
 
         typed(&mut rig, &fresh.executor, &keys(&["d"]));
         rig.settle(
@@ -526,6 +532,15 @@ mod tests {
             |r, _| picked(r).is_some_and(|q| q.len() >= 4),
         );
         let at = rig.frames;
+        let resent: Vec<Vec<u8>> = rig
+            .model
+            .dvr
+            .inputs()
+            .take_while(|input| input.after_frame < at)
+            .map(|input| input.body.to_vec())
+            .collect();
+        expected.push(b"d".to_vec());
+        assert_eq!(resent, expected, "a second branch sends what the first did");
         let _again = rig.branch(
             &mut fresh.engine,
             &respawn,

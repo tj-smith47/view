@@ -2954,13 +2954,13 @@ mod tests {
         }
     }
 
-    /// A view command that refuses to run invokes nothing and says why in
+    /// A view command nvim refuses to run invokes nothing and says why in
     /// `ErrorMsg`. The keys behind its line stay held through that message
-    /// and the other commands' invocations, and go on the line's report.
+    /// and go on the line's report.
     #[test]
     fn keys_behind_a_view_command_that_refuses_go_on_the_lines_report() {
         use crate::native::ext::Ext;
-        let line = "View dvr export $NOPE/x | View picker files";
+        let line = "View! tree open";
         let mut model = normal_mode();
         model.attach_surfaces(vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages]);
         let _ = crate::update::update(&mut model, error_highlights(None));
@@ -2969,12 +2969,12 @@ mod tests {
             &mut model,
             Msg::Redraw(vec![
                 UiEvent::CmdlineHide { level: 1 },
-                message("echomsg", "view: DVR cannot export: $NOPE is not set"),
+                message("emsg", "E477: No ! allowed"),
                 mode("normal"),
             ]),
         );
         assert!(inputs(&sent).is_empty(), "{sent:?}");
-        assert!(held_through(&mut model, 1));
+        assert!(model.submit_hold.is_holding());
         let sent = crate::update::update(&mut model, line_ran(line));
         assert_eq!(inputs(&sent), ["x"]);
     }

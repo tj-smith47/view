@@ -547,8 +547,10 @@ pub(super) fn ai_panel_key(
         }
     } else if notation == "<CR>" && model.dvr.replaying() {
         // the prompt was sent when it was recorded; the composer empties
-        // as it did then
-        if !model.ai_panel_mut().take_input().is_empty() {
+        // where a live `<CR>` would empty it
+        let panel = model.ai_panel_mut();
+        if !panel.turn_in_flight && !panel.input().trim().is_empty() {
+            let _ = panel.take_input();
             model.dirty = true;
         }
     } else if notation == "<CR>" {

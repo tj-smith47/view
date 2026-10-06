@@ -205,7 +205,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     };
     // a prompt view raised itself answers in view, and a replay would type
     // its answer into the engine
-    if !replayed && model.dvr.is_recording() && !route::answers_a_view_prompt(model, &msg) {
+    if replayed {
+        model.dvr.note_replay_folded();
+    } else if model.dvr.is_recording() && !route::answers_a_view_prompt(model, &msg) {
         effects.extend(dvr::record(model, &msg));
     }
     let releases = crate::native::submit_hold::releases(model, &msg);

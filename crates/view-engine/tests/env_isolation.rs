@@ -567,6 +567,26 @@ fn an_isolated_childs_config_runs_with_no_swap_file() {
     });
 }
 
+/// An isolated child no UI attaches to writes no swap file either. nvim
+/// applies `-n` and `--cmd` only once a UI attaches, so two such children
+/// running `:file ordinary` and `:help` met at those swap names and one
+/// stopped at `E325` or `E303` (`open_picked_live` under the full gate).
+#[test]
+fn an_isolated_child_with_no_ui_writes_no_swap_file() {
+    with_prepared_dirs(|| {
+        let engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+        engine
+            .handle
+            .command("file view-no-ui-swap | call setline(1, 'x') | topleft help")
+            .unwrap();
+        let swaps = engine
+            .handle
+            .eval_str("swapname(bufnr('view-no-ui-swap')) .. '|' .. swapname('%')")
+            .unwrap();
+        assert_eq!(swaps, "|", "a child with no UI opened a swap file");
+    });
+}
+
 /// An isolated spawn must *run* the plant refusal against the home its plan
 /// points a child's `HOME` at: the directory existing proves nothing about
 /// who prepared it (see the test above), but only the preparation can

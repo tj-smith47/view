@@ -60,6 +60,16 @@ impl SubmitHold {
         }
     }
 
+    /// The `:View` lines submitted by hand that nvim has not reported yet,
+    /// the one a hold waits on first.
+    pub(crate) fn unreported_lines(&self) -> impl Iterator<Item = &str> {
+        let armed = matches!(self.held, Some((Armed::Command, _))).then_some(&self.armed_line);
+        armed
+            .into_iter()
+            .chain(self.timed_out.iter().map(|(line, _)| line))
+            .map(String::as_str)
+    }
+
     /// Forgets every timed-out line the host's age check at `now` has seen
     /// for `bound` with no report, so a line nvim never reports is told
     /// apart for one bound and no longer. A line is stamped on the first

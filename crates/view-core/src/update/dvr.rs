@@ -73,6 +73,29 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
     }
 }
 
+/// Whether `:View review <verb>` is a recorded line a branch's replay ran
+/// again, which decides nothing in the review pending now. A verb a line
+/// typed by hand invokes while recording is owed to the next replay; one
+/// a review's own key invokes is not, since the replacement installs no
+/// review keys.
+pub(super) fn replayed_review(model: &mut Model, verb: &str) -> bool {
+    if !model.dvr.is_recording() {
+        return false;
+    }
+    let word = format!("review {verb}");
+    if model.dvr.absorb_invoke(&word) {
+        return true;
+    }
+    let typed = model.submit_hold.unreported_lines().any(|line| {
+        line.split(|c: char| c.is_whitespace() || c == '|')
+            .any(|w| w == "review")
+    });
+    if typed {
+        model.dvr.owe_on_replay(&word);
+    }
+    false
+}
+
 /// Queues a read of the clip at `path`, which opens in the scrub once read,
 /// closing the clip shown. Refused while another clip is being read.
 fn play(model: &mut Model, path: &str) -> Vec<Effect> {
@@ -741,6 +764,25 @@ mod tests {
     }
 
     #[test]
+    fn a_replayed_panel_enter_keeps_what_a_live_one_keeps() {
+        for (typed, in_flight) in [("hi", true), ("  ", false)] {
+            let mut m = panel_open();
+            m.ai_panel_mut().turn_in_flight = in_flight;
+            for c in typed.chars() {
+                let _ = update(&mut m, key(&c.to_string()));
+            }
+            let _ = update(&mut m, key("<CR>"));
+            assert_eq!(m.ai_panel().input(), typed, "kept live");
+            let _ = m.ai_panel_mut().take_input();
+            m.dvr.note_frame(10, 2);
+
+            let replayed = branched(&mut m, 10, 12);
+            assert!(!reaches_agent(&replayed), "{replayed:?}");
+            assert_eq!(m.ai_panel().input(), typed, "kept on replay");
+        }
+    }
+
+    #[test]
     fn a_pending_permission_survives_a_replay_of_its_option_keys() {
         let mut m = panel_open();
         for k in ["1", "2", "<Esc>"] {
@@ -769,6 +811,60 @@ mod tests {
         let replayed = branched(&mut m, 11, 12);
         assert!(!reaches_agent(&replayed), "{replayed:?}");
         assert_eq!(m.ai_panel().pending_permission.as_ref(), Some(&before));
+    }
+
+    /// Types `line` on nvim's command line and submits it.
+    fn type_line(m: &mut Model, line: &str) {
+        let _ = update(m, key(":"));
+        for c in line.chars() {
+            let _ = update(m, key(&c.to_string()));
+        }
+        let _ = update(m, key("<CR>"));
+    }
+
+    fn review_invoke(verb: &str) -> Msg {
+        Msg::FeatureInvoke {
+            generation: None,
+            feature: "review".to_owned(),
+            verb: verb.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_replayed_review_line_decides_nothing_in_the_live_review() {
+        use crate::native::diff::hunk::Hunk;
+        for verb in ["accept", "accept_all", "reject", "reject_all", "leave"] {
+            let mut m = recorded();
+            m.ai_enabled = true;
+            m.ai_trusted = true;
+            let line = format!("View review {verb}");
+            type_line(&mut m, &line);
+            assert!(
+                m.submit_hold.unreported_lines().any(|l| l == line),
+                "{verb}: the line holds"
+            );
+            let _ = update(&mut m, review_invoke(verb));
+            let _ = update(&mut m, Msg::CommandLineRan { line });
+            m.dvr.note_frame(10, 2);
+
+            let hunk = Hunk::new((0, 1), vec!["new".to_owned()], 0, vec!["old".to_owned()]);
+            let review = crate::native::ai_panel::DiffReviewState::new(
+                4,
+                std::path::PathBuf::from("/w/a.rs"),
+                m.next_hidden_generation(),
+                vec![hunk],
+            );
+            m.ai_panel_mut().pending_diff = Some(review.clone());
+            let replayed = branched(&mut m, 10, 12);
+            assert!(!reaches_agent(&replayed), "{verb}: {replayed:?}");
+            let invoked = update(&mut m, review_invoke(verb));
+            assert!(invoked.is_empty(), "{verb}: {invoked:?}");
+            assert_eq!(
+                m.ai_panel().pending_diff.as_ref(),
+                Some(&review),
+                "{verb}: the live review is untouched"
+            );
+        }
     }
 
     #[test]

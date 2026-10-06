@@ -254,6 +254,10 @@ pub struct Dvr {
     history: Vec<(usize, u64, Marker, String)>,
     /// A branch's recorded input, held until the replacement has started.
     replay: Vec<Msg>,
+    /// How many of the replayed inputs, the newest the log holds, have not
+    /// reached the engine yet. Input logged meanwhile goes ahead of them,
+    /// since the engine gets it first.
+    unfolded: usize,
     /// The clip the scrub shows in place of the recording.
     clip: Option<String>,
     /// How many of the clip's oldest frames did not fit `[dvr] max_mb`.
@@ -412,9 +416,15 @@ impl Dvr {
             return;
         }
         self.markers.push((self.last_frame, Marker::Invoke));
+        self.owe_on_replay(word);
+    }
+
+    /// Notes that a replay of the inputs logged so far invokes `word`
+    /// again, which then runs nothing.
+    pub(crate) fn owe_on_replay(&mut self, word: &str) {
         // a replay ends where the log filled, so a verb past that point is
         // never replayed and owes nothing
-        if self.overflowed_at.is_none() {
+        if self.recording && self.overflowed_at.is_none() {
             self.history.push((
                 self.entries.len(),
                 self.last_frame,
@@ -513,10 +523,14 @@ impl Dvr {
             .iter()
             .take_while(|entry| entry.after_frame < at)
             .count();
+        // an input logged ahead of a replayed one sits after it in the arena
         let end = self
             .entries
-            .get(kept)
-            .map_or(self.arena.len(), |entry| entry.start as usize);
+            .iter()
+            .take(kept)
+            .map(|entry| (entry.start + entry.len) as usize)
+            .max()
+            .unwrap_or(0);
         self.entries.truncate(kept);
         self.arena.truncate(end);
         self.overflowed_at = None;
@@ -528,6 +542,7 @@ impl Dvr {
             self.dead.push(at + 1..=self.last_frame);
         }
         self.markers.push((self.last_frame, Marker::Branch));
+        self.unfolded = 0;
         self.replay = replay;
         self.paused = false;
     }
@@ -561,6 +576,7 @@ impl Dvr {
         if replay.is_empty() {
             return replay;
         }
+        self.unfolded = replay.len();
         let mut replay: Vec<Msg> = replay
             .into_iter()
             .map(|msg| Msg::Replayed(Box::new(msg)))
@@ -577,6 +593,12 @@ impl Dvr {
         });
         replay.append(&mut self.held);
         replay
+    }
+
+    /// Notes that the oldest replayed input still unsent has reached the
+    /// engine.
+    pub(crate) fn note_replay_folded(&mut self) {
+        self.unfolded = self.unfolded.saturating_sub(1);
     }
 
     /// Whether a replayed input is being folded.
@@ -643,9 +665,15 @@ impl Dvr {
         self.overflowed_at
     }
 
-    /// Appends `msg` to the input log when it is an input. Allocates
-    /// nothing: an input the reserved log cannot hold stops the log there.
+    /// Appends `msg` to the input log when it is an input, ahead of any
+    /// replayed input the engine has not been sent yet. A replayed input,
+    /// logged already, is noted as sent. Allocates nothing: an input the
+    /// reserved log cannot hold stops the log there.
     pub(crate) fn record(&mut self, msg: &Msg) {
+        if matches!(msg, Msg::Replayed(_)) {
+            self.note_replay_folded();
+            return;
+        }
         if !self.recording || self.paused || self.overflowed_at.is_some() {
             return;
         }
@@ -687,12 +715,21 @@ impl Dvr {
             }
             _ => return,
         }
-        self.entries.push(Entry {
-            kind,
-            after_frame: self.last_frame,
-            start,
-            len,
-        });
+        let at = self.entries.len().saturating_sub(self.unfolded);
+        // the inputs moved behind this one are sent after it, so they
+        // follow the frame it followed
+        for entry in self.entries.iter_mut().skip(at) {
+            entry.after_frame = entry.after_frame.max(self.last_frame);
+        }
+        self.entries.insert(
+            at,
+            Entry {
+                kind,
+                after_frame: self.last_frame,
+                start,
+                len,
+            },
+        );
     }
 
     /// Queues an export of the recording to `path`, or to a path the loop
@@ -953,6 +990,41 @@ mod tests {
         assert_eq!(logged[3], b"early", "in the order the engine got them");
         dvr.record(&key("j"));
         assert_eq!(dvr.inputs().count(), 5, "a key after the replay is logged");
+    }
+
+    #[test]
+    fn a_replayed_key_sent_after_the_closing_resize_is_logged_after_it() {
+        let mut dvr = recording();
+        dvr.note_frame(1, 0);
+        for k in ["a", "b", "c"] {
+            dvr.record(&key(k));
+        }
+        dvr.note_frame(2, 0);
+        dvr.confirm_branch(2);
+        let plan = queued(&mut dvr);
+        dvr.branched(plan.at_frame, plan.replay);
+        let replay = dvr.take_replay((120, 40));
+        let (resize, live) = (&replay[3], key("x"));
+        // `b` and `c` wait in a hold the resize does not
+        dvr.record(&replay[0]);
+        dvr.record(resize);
+        dvr.record(&replay[1]);
+        dvr.record(&replay[2]);
+        dvr.record(&live);
+        let logged: Vec<_> = dvr.inputs().map(|i| i.body.to_vec()).collect();
+        let engine_order: [&[u8]; 5] = [b"a", &[120, 0, 40, 0], b"b", b"c", b"x"];
+        assert_eq!(logged, engine_order);
+        dvr.note_frame(3, 0);
+        let again: Vec<_> = dvr
+            .replay_until(3)
+            .iter()
+            .map(|m| format!("{m:?}"))
+            .collect();
+        let shown: Vec<_> = [key("a"), resized(120, 40), key("b"), key("c"), key("x")]
+            .iter()
+            .map(|m| format!("{m:?}"))
+            .collect();
+        assert_eq!(again, shown, "a second branch sends what the first did");
     }
 
     fn queued(dvr: &mut Dvr) -> BranchPlan {

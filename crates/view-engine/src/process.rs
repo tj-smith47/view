@@ -400,15 +400,14 @@ impl EngineConfig {
     /// past those flags to redirect the child's configuration anyway (see
     /// [`crate::env`]).
     ///
-    /// `-n` carries that caveat and no other flag here does: it sets
-    /// `'updatecount'` to 0, and nvim applies it only after
+    /// `-n` and `--cmd` carry that caveat: nvim applies both only after
     /// `remote_ui_wait_for_attach` returns, which for an `--embed` child is
     /// where it parks servicing RPC. A caller that drives such a child
     /// without ever attaching a UI runs every command it sends ahead of
-    /// that, with the swapfile still on -- so what keeps two isolated
-    /// children off one swap directory is
-    /// [`crate::env::prepare_hermetic_home`] owning that directory before
-    /// either starts, never this flag.
+    /// that, with `'updatecount'` at its default, so [`Engine::spawn`] sets
+    /// it to 0 over RPC right after the handshake of any child spawned
+    /// with `-n`. [`crate::env::prepare_hermetic_home`] owns the swap
+    /// directory before either starts.
     ///
     /// For everything that measures the engine rather than a user's editor
     /// (the oracle's reference sessions, the engine's own tests), whose
@@ -442,7 +441,10 @@ impl EngineConfig {
     /// isolated child shares one swap directory under the hermetic home,
     /// and nvim applies `-n` only after the config has run, so a config
     /// that edits the unnamed buffer would race every concurrent child for
-    /// one swap name and stop at `E300` or `E303` with the rest unread.
+    /// one swap name and stop at `E300` or `E303` with the rest unread. A
+    /// child no UI attaches to takes the same `'updatecount'` from the
+    /// spawn's first request, so two of them naming one file (`:file`,
+    /// `:help`) meet no `E325` or `E303`.
     #[must_use]
     pub fn isolated() -> Self {
         Self {
@@ -1291,6 +1293,16 @@ impl Engine {
                     });
                 }
             };
+        // nvim applies `-n` and every `--cmd` only once a UI has attached,
+        // and a child driven over RPC alone runs each command ahead of that
+        // with 'updatecount' at its default, writing swap files that
+        // concurrent children with the same swap directory collide on
+        if cfg.extra_args.iter().any(|arg| arg == "-n") {
+            let off = vec![Value::from("set updatecount=0")];
+            if let Err(err) = handle.request_timeout("nvim_command", off, cfg.handshake_timeout) {
+                return Err(SpawnAttempt::Fatal(err));
+            }
+        }
         // handshake succeeded: disarm the guard and hand the child to the
         // long-lived Engine, which now owns reaping it via its own Drop
         // unreachable else: nothing clears guard.0 before this point
