@@ -72,16 +72,6 @@ impl SubmitHold {
         }
     }
 
-    /// The `:View` lines submitted by hand that nvim has not reported yet,
-    /// the one a hold waits on first.
-    pub(crate) fn unreported_lines(&self) -> impl Iterator<Item = &str> {
-        let armed = matches!(self.held, Some((Armed::Command, _))).then_some(&self.armed_line);
-        armed
-            .into_iter()
-            .chain(self.timed_out.iter().map(|old| &old.line))
-            .map(String::as_str)
-    }
-
     /// Whether `line` is the report of a timed-out line.
     pub(super) fn reports_timed_out(&self, line: &str) -> bool {
         self.timed_out.iter().any(|old| same_line(&old.line, line))

@@ -205,11 +205,10 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     };
     // a prompt view raised itself answers in view, and a replay would type
     // its answer into the engine
-    if replayed {
-        model.dvr.note_replay_folded();
-    } else if model.dvr.is_recording() && !route::answers_a_view_prompt(model, &msg) {
+    if !replayed && model.dvr.is_recording() && !route::answers_a_view_prompt(model, &msg) {
         effects.extend(dvr::record(model, &msg));
     }
+    let flush = model.dvr.note_sent(&msg, replayed);
     let releases = crate::native::submit_hold::releases(model, &msg);
     if crate::native::submit_hold::note_line_bound(model, &msg) {
         effects.push(Effect::Rpc(RpcCall::RegisterCommand));
@@ -217,6 +216,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     effects.extend(dvr::fold_replayed(model, replayed, |model| {
         update_one(model, msg)
     }));
+    effects.extend(flush.map(|generation| Effect::Rpc(RpcCall::FlushReplay { generation })));
     // replayed after the command has run, so the focus it set routes them,
     // or once it stops at a prompt they answer. A replayed `:View` submit
     // arms a fresh hold, which the rest are then kept behind in order
@@ -661,6 +661,10 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             observed_for,
         } => note_engine_liveness(model, wedge, observed_for),
         Msg::DvrIo(reply) => dvr::on_io(model, &reply),
+        Msg::ReplayFlushed { generation } => {
+            model.dvr.note_flushed(generation);
+            Vec::new()
+        }
         Msg::FeatureInvoke { feature, verb, .. } => {
             // A bare `:View <feature>` (no verb) means "just open it":
             // resolved to the feature's own first `default_maps()` entry
@@ -677,6 +681,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 verb
             };
             model.log_invocation(&feature, &verb);
+            // a replayed key or line may invoke either one again, and its
+            // source cannot be told from a person's
+            if model.dvr.draining() && (feature == "review" || feature == "dvr") {
+                return Vec::new();
+            }
             // `ai_enabled` gates ahead of `ai_trusted`: a feature that is
             // off has nothing to trust it for, so prompting first would ask
             // a question whose every answer is thrown away the moment the

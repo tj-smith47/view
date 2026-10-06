@@ -99,6 +99,7 @@ mod tests {
                 forced: false,
             }),
             Waiter::Opened { generation: 1 },
+            Waiter::ReplayFlush { generation: 1 },
         ]
     }
 
@@ -126,6 +127,7 @@ mod tests {
             Waiter::AiFs { .. } => 17,
             Waiter::Checktime(_) => 18,
             Waiter::Opened { .. } => 19,
+            Waiter::ReplayFlush { .. } => 20,
         }
     }
 

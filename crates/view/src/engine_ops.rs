@@ -124,6 +124,9 @@ pub trait EngineOps {
     /// `generation`; never blocks, and never itself returns the list (see
     /// `Msg::PickerBuffers`).
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError>;
+    /// Asks for a reply nvim sends once it has run the input sent ahead of
+    /// it, tagged `generation`; never blocks (see `Msg::ReplayFlushed`).
+    fn flush_replay(&self, generation: u64) -> Result<(), EngineError>;
     /// Opens a window for `surface`, or enters the one it already has;
     /// never blocks, and never itself returns the handle (see
     /// `Msg::NativeWindowOpened`).
@@ -430,6 +433,9 @@ impl EngineOps for EngineHandle {
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         self.list_buffers(generation)
     }
+    fn flush_replay(&self, generation: u64) -> Result<(), EngineError> {
+        self.flush_replay(generation)
+    }
     fn open_native_window(
         &self,
         surface: NativeSurface,
@@ -689,6 +695,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         (**self).list_buffers(generation)
+    }
+    fn flush_replay(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).flush_replay(generation)
     }
     fn open_native_window(
         &self,
@@ -952,6 +961,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         (**self).list_buffers(generation)
+    }
+    fn flush_replay(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).flush_replay(generation)
     }
     fn open_native_window(
         &self,
@@ -1276,6 +1288,9 @@ impl EngineOps for FakeOps {
     }
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         self.record(format!("list_buffers({generation})"))
+    }
+    fn flush_replay(&self, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("flush_replay({generation})"))
     }
     fn open_native_window(
         &self,
@@ -1602,6 +1617,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn list_buffers(&self, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn flush_replay(&self, _generation: u64) -> Result<(), EngineError> {
         Ok(())
     }
     fn open_native_window(

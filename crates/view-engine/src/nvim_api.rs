@@ -3643,6 +3643,43 @@ impl EngineHandle {
         )
     }
 
+    /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into the picker's buffer-list corpus and routed to the connection's
+    /// pump as `Msg::PickerBuffers`. Async on the same terms as
+    /// [`request_probe`](Self::request_probe): `Source::Buffers`'s picker
+    /// query is issued from the runtime loop, which must never block on a
+    /// reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_buffer_list(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        let waiter = crate::handle::Waiter::BufferList { generation };
+        self.request_async(method, params, waiter)
+    }
+
+    /// Asks nvim for a reply it sends only once it has run every input
+    /// sent ahead of this request, since it reads pending input before it
+    /// takes a request that is not `fast`. The reply crosses back as
+    /// `Msg::ReplayFlushed` tagged `generation`, error or not. Async: the
+    /// caller is the runtime loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn flush_replay(&self, generation: u64) -> Result<(), EngineError> {
+        let waiter = crate::handle::Waiter::ReplayFlush { generation };
+        self.request_async("nvim_eval", vec![Value::from("0")], waiter)
+    }
+
     /// Issues [`PREVIEW_WINDOW_CHUNK`] as an async request tagged with
     /// `generation`, resolving the picker preview pane's text for
     /// `line_count` lines of `path` from the 1-based `first_line` on: the

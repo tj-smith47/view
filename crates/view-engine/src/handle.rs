@@ -244,6 +244,9 @@ pub(crate) enum Waiter {
     Checktime(CheckTimeCall),
     /// An open of a chosen file or buffer, answered as `Msg::PickedOpened`.
     Opened { generation: u64 },
+    /// A flush behind a branch's replay, answered as `Msg::ReplayFlushed`
+    /// whatever the reply holds.
+    ReplayFlush { generation: u64 },
 }
 
 /// The set of in-flight request waiters plus a `closed` flag, guarded by a
@@ -1038,6 +1041,11 @@ impl EngineHandle {
                                         pump.route_msg(Msg::PickedOpened { generation, window });
                                 }
                             }
+                            Some(Waiter::ReplayFlush { generation }) => {
+                                if let Some(pump) = &reader_pump {
+                                    pump.route_replay_flushed(Msg::ReplayFlushed { generation });
+                                }
+                            }
                             None => {}
                         }
                     }
@@ -1780,27 +1788,6 @@ impl EngineHandle {
         generation: u64,
     ) -> Result<(), EngineError> {
         self.request_async(method, params, Waiter::SwapRecovery { generation })
-    }
-
-    /// Issues `method`/`params` as a request whose `Response` is decoded
-    /// into the picker's buffer-list corpus and routed to the connection's
-    /// pump as `Msg::PickerBuffers` (see [`Waiter::BufferList`]). Async
-    /// on the same terms as [`request_probe`](Self::request_probe):
-    /// `Source::Buffers`'s picker query is issued from the runtime loop,
-    /// which must never block on a reply.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::Closed` if the connection is already closed or
-    /// the writer thread has already exited; the request is never written in
-    /// either case.
-    pub fn request_buffer_list(
-        &self,
-        method: &str,
-        params: Vec<Value>,
-        generation: u64,
-    ) -> Result<(), EngineError> {
-        self.request_async(method, params, Waiter::BufferList { generation })
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded

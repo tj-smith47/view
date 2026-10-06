@@ -849,6 +849,14 @@ impl PumpShared {
         self.route_queued(msg);
     }
 
+    /// Routes a `Msg::ReplayFlushed` on the never-drop, never-reorder
+    /// terms [`route_ai_fs`](Self::route_ai_fs) states: a dropped answer
+    /// leaves the drain open, and every review and DVR verb dropped, for
+    /// the rest of the session.
+    pub(crate) fn route_replay_flushed(&self, msg: Msg) {
+        self.route_queued(msg);
+    }
+
     fn route_queued(&self, msg: Msg) {
         let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
         route.retry_deferred();

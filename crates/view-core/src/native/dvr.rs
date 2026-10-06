@@ -242,16 +242,19 @@ pub struct Dvr {
     paused: bool,
     /// Whether a replayed input is being folded, which reaches no agent.
     replaying: bool,
-    /// The words of the replayed DVR verbs still to arrive, in order,
-    /// which run nothing.
-    owed: VecDeque<String>,
+    /// Whether a replay's inputs went to the engine and nvim has not yet
+    /// answered the flush sent after the last of them.
+    draining: bool,
+    /// The flush whose answer ends the drain, once the closing resize is
+    /// sent.
+    flush: Option<u64>,
+    /// The flushes asked for so far, which numbers the next one.
+    flushes: u64,
     /// A person's input folded while a replay is owed.
     held: Vec<Msg>,
-    /// Each DVR verb and engine restart, with the count of inputs logged
-    /// before it, the newest frame then and the verb's word. Kept whole
-    /// while frames are dropped, since a replay starts from the first
-    /// input.
-    history: Vec<(usize, u64, Marker, String)>,
+    /// The newest frame before each engine restart. Kept whole while
+    /// frames are dropped, since a replay starts from the first input.
+    restarts: Vec<u64>,
     /// A branch's recorded input, held until the replacement has started.
     replay: Vec<Msg>,
     /// How many of the replayed inputs, the newest the log holds, have not
@@ -410,27 +413,10 @@ impl Dvr {
         self.requests.push_back(DvrRequest::Play(path));
     }
 
-    /// Marks the newest frame as the one the DVR verb `word` ran on.
-    pub(crate) fn mark_invoke(&mut self, word: &str) {
-        if !self.recording {
-            return;
-        }
-        self.markers.push((self.last_frame, Marker::Invoke));
-        self.owe_on_replay(word);
-    }
-
-    /// Notes that a replay of the inputs logged so far invokes `word`
-    /// again, which then runs nothing.
-    pub(crate) fn owe_on_replay(&mut self, word: &str) {
-        // a replay ends where the log filled, so a verb past that point is
-        // never replayed and owes nothing
-        if self.recording && self.overflowed_at.is_none() {
-            self.history.push((
-                self.entries.len(),
-                self.last_frame,
-                Marker::Invoke,
-                word.to_owned(),
-            ));
+    /// Marks the newest frame as the one a DVR verb ran on.
+    pub(crate) fn mark_invoke(&mut self) {
+        if self.recording {
+            self.markers.push((self.last_frame, Marker::Invoke));
         }
     }
 
@@ -444,15 +430,12 @@ impl Dvr {
     }
 
     /// Marks the newest frame as the last one the dead engine drew.
+    /// A drain ends with it, since the dead engine answers no flush.
     pub fn note_restart(&mut self) {
+        self.end_drain();
         if self.recording {
             self.markers.push((self.last_frame, Marker::EngineRestart));
-            self.history.push((
-                self.entries.len(),
-                self.last_frame,
-                Marker::EngineRestart,
-                String::new(),
-            ));
+            self.restarts.push(self.last_frame);
         }
     }
 
@@ -490,10 +473,7 @@ impl Dvr {
     /// into one engine does not reproduce.
     #[must_use]
     pub fn restarts_before(&self, at: u64) -> usize {
-        self.history
-            .iter()
-            .filter(|(_, frame, kind, _)| *kind == Marker::EngineRestart && *frame < at)
-            .count()
+        self.restarts.iter().filter(|frame| **frame < at).count()
     }
 
     /// Queues the branch from frame `at`, replaying the inputs folded
@@ -534,15 +514,13 @@ impl Dvr {
         self.entries.truncate(kept);
         self.arena.truncate(end);
         self.overflowed_at = None;
-        self.history.retain(|(inputs, frame, kind, _)| match kind {
-            Marker::Invoke => *inputs <= kept,
-            _ => *frame < at,
-        });
+        self.restarts.retain(|frame| *frame < at);
         if at < self.last_frame {
             self.dead.push(at + 1..=self.last_frame);
         }
         self.markers.push((self.last_frame, Marker::Branch));
         self.unfolded = 0;
+        self.end_drain();
         self.replay = replay;
         self.paused = false;
     }
@@ -569,23 +547,20 @@ impl Dvr {
     /// The replay a branch staged, to fold in order now, each input a
     /// [`Msg::Replayed`], followed by a resize to `size`, the terminal's
     /// size now, and the input a person typed while it was owed. The log
-    /// holds the replayed inputs already, so folding them logs nothing, and
-    /// the DVR verbs they invoke run nothing. Empty when no replay is owed.
+    /// holds the replayed inputs already, so folding them logs nothing.
+    /// The replay drains from here until nvim answers the flush sent after
+    /// its last input. Empty when no replay is owed.
     pub fn take_replay(&mut self, size: (u16, u16)) -> Vec<Msg> {
         let replay = std::mem::take(&mut self.replay);
         if replay.is_empty() {
             return replay;
         }
         self.unfolded = replay.len();
+        self.draining = true;
+        self.flush = None;
         let mut replay: Vec<Msg> = replay
             .into_iter()
             .map(|msg| Msg::Replayed(Box::new(msg)))
-            .collect();
-        self.owed = self
-            .history
-            .iter()
-            .filter(|(_, _, kind, _)| *kind == Marker::Invoke)
-            .map(|(_, _, _, word)| word.clone())
             .collect();
         replay.push(Msg::Resized {
             width: size.0,
@@ -595,10 +570,43 @@ impl Dvr {
         replay
     }
 
-    /// Notes that the oldest replayed input still unsent has reached the
-    /// engine.
-    pub(crate) fn note_replay_folded(&mut self) {
-        self.unfolded = self.unfolded.saturating_sub(1);
+    /// Notes that an input went to the engine, `replayed` or not, and
+    /// returns the flush to send behind it while the replay drains: one
+    /// behind the closing resize, and one behind each replayed input a
+    /// hold sent after it.
+    pub(crate) fn note_sent(&mut self, msg: &Msg, replayed: bool) -> Option<u64> {
+        if replayed {
+            self.unfolded = self.unfolded.saturating_sub(1);
+        }
+        let closing = !replayed && self.flush.is_none() && matches!(msg, Msg::Resized { .. });
+        let late = replayed && self.flush.is_some();
+        if !self.draining || !(closing || late) {
+            return None;
+        }
+        self.flushes += 1;
+        self.flush = Some(self.flushes);
+        self.flush
+    }
+
+    /// Notes nvim's answer to flush `generation`, which ends the drain
+    /// when it is the newest one sent and no replayed input waits in a
+    /// hold.
+    pub(crate) fn note_flushed(&mut self, generation: u64) {
+        if self.flush == Some(generation) && self.unfolded == 0 {
+            self.end_drain();
+        }
+    }
+
+    fn end_drain(&mut self) {
+        self.draining = false;
+        self.flush = None;
+    }
+
+    /// Whether a replay's inputs may still be running in the engine, so a
+    /// review or DVR verb arriving now may be one of them.
+    #[must_use]
+    pub fn draining(&self) -> bool {
+        self.draining
     }
 
     /// Whether a replayed input is being folded.
@@ -611,19 +619,6 @@ impl Dvr {
     /// noted before.
     pub(crate) fn set_replaying(&mut self, replaying: bool) -> bool {
         std::mem::replace(&mut self.replaying, replaying)
-    }
-
-    /// Takes the replayed DVR verb `word`, which runs nothing, when it is
-    /// the next one owed. False for a verb a person asked for. A verb of
-    /// another word drops every owed verb, since the engine will not run
-    /// the rest.
-    pub(crate) fn absorb_invoke(&mut self, word: &str) -> bool {
-        if self.owed.front().is_some_and(|owed| owed == word) {
-            self.owed.pop_front();
-            return true;
-        }
-        self.owed.clear();
-        false
     }
 
     /// The oldest request the loop has not taken yet.
@@ -666,14 +661,9 @@ impl Dvr {
     }
 
     /// Appends `msg` to the input log when it is an input, ahead of any
-    /// replayed input the engine has not been sent yet. A replayed input,
-    /// logged already, is noted as sent. Allocates nothing: an input the
-    /// reserved log cannot hold stops the log there.
+    /// replayed input the engine has not been sent yet. Allocates nothing:
+    /// an input the reserved log cannot hold stops the log there.
     pub(crate) fn record(&mut self, msg: &Msg) {
-        if matches!(msg, Msg::Replayed(_)) {
-            self.note_replay_folded();
-            return;
-        }
         if !self.recording || self.paused || self.overflowed_at.is_some() {
             return;
         }
@@ -981,8 +971,17 @@ mod tests {
             "{shown:?}"
         );
         assert!(shown[3].contains("early"), "{shown:?}");
+        // as `update` folds them: a replayed input is logged already
         for msg in &replay {
-            dvr.record(msg);
+            match msg {
+                Msg::Replayed(inner) => {
+                    let _ = dvr.note_sent(inner, true);
+                }
+                msg => {
+                    dvr.record(msg);
+                    let _ = dvr.note_sent(msg, false);
+                }
+            }
         }
         let logged: Vec<_> = dvr.inputs().map(|i| i.body.to_vec()).collect();
         assert_eq!(logged.len(), 4, "the closing resize and the key are logged");
@@ -990,41 +989,6 @@ mod tests {
         assert_eq!(logged[3], b"early", "in the order the engine got them");
         dvr.record(&key("j"));
         assert_eq!(dvr.inputs().count(), 5, "a key after the replay is logged");
-    }
-
-    #[test]
-    fn a_replayed_key_sent_after_the_closing_resize_is_logged_after_it() {
-        let mut dvr = recording();
-        dvr.note_frame(1, 0);
-        for k in ["a", "b", "c"] {
-            dvr.record(&key(k));
-        }
-        dvr.note_frame(2, 0);
-        dvr.confirm_branch(2);
-        let plan = queued(&mut dvr);
-        dvr.branched(plan.at_frame, plan.replay);
-        let replay = dvr.take_replay((120, 40));
-        let (resize, live) = (&replay[3], key("x"));
-        // `b` and `c` wait in a hold the resize does not
-        dvr.record(&replay[0]);
-        dvr.record(resize);
-        dvr.record(&replay[1]);
-        dvr.record(&replay[2]);
-        dvr.record(&live);
-        let logged: Vec<_> = dvr.inputs().map(|i| i.body.to_vec()).collect();
-        let engine_order: [&[u8]; 5] = [b"a", &[120, 0, 40, 0], b"b", b"c", b"x"];
-        assert_eq!(logged, engine_order);
-        dvr.note_frame(3, 0);
-        let again: Vec<_> = dvr
-            .replay_until(3)
-            .iter()
-            .map(|m| format!("{m:?}"))
-            .collect();
-        let shown: Vec<_> = [key("a"), resized(120, 40), key("b"), key("c"), key("x")]
-            .iter()
-            .map(|m| format!("{m:?}"))
-            .collect();
-        assert_eq!(again, shown, "a second branch sends what the first did");
     }
 
     fn queued(dvr: &mut Dvr) -> BranchPlan {

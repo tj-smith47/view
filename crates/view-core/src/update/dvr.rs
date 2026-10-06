@@ -52,10 +52,7 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
     }
     // the path is every byte after the first blank run, as typed
     let (word, path) = verb.split_once(char::is_whitespace).unwrap_or((verb, ""));
-    if model.dvr.absorb_invoke(word) {
-        return Vec::new();
-    }
-    model.dvr.mark_invoke(word);
+    model.dvr.mark_invoke();
     match word {
         "scrub" if !model.dvr.open_scrub() => {
             model.engine.record_native_notice(EMPTY.to_string(), false)
@@ -71,29 +68,6 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
             .engine
             .record_native_notice(super::feature_invoke_notice("dvr", verb, false), false),
     }
-}
-
-/// Whether `:View review <verb>` is a recorded line a branch's replay ran
-/// again, which decides nothing in the review pending now. A verb a line
-/// typed by hand invokes while recording is owed to the next replay; one
-/// a review's own key invokes is not, since the replacement installs no
-/// review keys.
-pub(super) fn replayed_review(model: &mut Model, verb: &str) -> bool {
-    if !model.dvr.is_recording() {
-        return false;
-    }
-    let word = format!("review {verb}");
-    if model.dvr.absorb_invoke(&word) {
-        return true;
-    }
-    let typed = model.submit_hold.unreported_lines().any(|line| {
-        line.split(|c: char| c.is_whitespace() || c == '|')
-            .any(|w| w == "review")
-    });
-    if typed {
-        model.dvr.owe_on_replay(&word);
-    }
-    false
 }
 
 /// Queues a read of the clip at `path`, which opens in the scrub once read,
@@ -857,41 +831,133 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_replayed_review_line_decides_nothing_in_the_live_review() {
-        use crate::native::diff::hunk::Hunk;
-        for verb in ["accept", "accept_all", "reject", "reject_all", "leave"] {
-            let mut m = recorded();
-            m.ai_enabled = true;
-            m.ai_trusted = true;
-            let line = format!("View review {verb}");
-            type_line(&mut m, &line);
-            assert!(
-                m.submit_hold.unreported_lines().any(|l| l == line),
-                "{verb}: the line holds"
-            );
-            let _ = update(&mut m, review_invoke(verb));
-            let _ = update(&mut m, Msg::CommandLineRan { line });
-            m.dvr.note_frame(10, 2);
-
-            let hunk = Hunk::new((0, 1), vec!["new".to_owned()], 0, vec!["old".to_owned()]);
-            let review = crate::native::ai_panel::DiffReviewState::new(
-                4,
-                std::path::PathBuf::from("/w/a.rs"),
-                m.next_hidden_generation(),
-                vec![hunk],
-            );
-            m.ai_panel_mut().pending_diff = Some(review.clone());
-            let replayed = branched(&mut m, 10, 12);
-            assert!(!reaches_agent(&replayed), "{verb}: {replayed:?}");
-            let invoked = update(&mut m, review_invoke(verb));
-            assert!(invoked.is_empty(), "{verb}: {invoked:?}");
-            assert_eq!(
-                m.ai_panel().pending_diff.as_ref(),
-                Some(&review),
-                "{verb}: the live review is untouched"
-            );
+    /// Folds nvim's answer to every flush in `effects`.
+    fn flushed(m: &mut Model, effects: &[Effect]) {
+        for effect in effects {
+            if let Effect::Rpc(RpcCall::FlushReplay { generation }) = effect {
+                let _ = update(
+                    m,
+                    Msg::ReplayFlushed {
+                        generation: *generation,
+                    },
+                );
+            }
         }
+    }
+
+    /// A review of one hunk, pending in the agent panel.
+    fn pending_review(m: &mut Model) -> crate::native::ai_panel::DiffReviewState {
+        use crate::native::diff::hunk::Hunk;
+        let hunk = Hunk::new((0, 1), vec!["new".to_owned()], 0, vec!["old".to_owned()]);
+        let review = crate::native::ai_panel::DiffReviewState::new(
+            4,
+            std::path::PathBuf::from("/w/a.rs"),
+            m.next_hidden_generation(),
+            vec![hunk],
+        );
+        m.ai_panel_mut().pending_diff = Some(review.clone());
+        review
+    }
+
+    #[test]
+    fn a_review_verb_decides_nothing_while_the_replay_drains() {
+        for verb in ["accept", "accept_all", "reject", "reject_all", "leave"] {
+            for typed in [true, false] {
+                let mut m = recorded();
+                m.ai_enabled = true;
+                m.ai_trusted = true;
+                let _ = update(&mut m, key("x"));
+                let line = format!("View review {verb}");
+                if typed {
+                    type_line(&mut m, &line);
+                }
+                let _ = update(&mut m, review_invoke(verb));
+                let _ = update(&mut m, Msg::CommandLineRan { line });
+                m.dvr.note_frame(10, 2);
+
+                let review = pending_review(&mut m);
+                let replayed = branched(&mut m, 10, 12);
+                assert!(!reaches_agent(&replayed), "{verb}: {replayed:?}");
+                assert!(m.dvr.draining(), "{verb}: drains until nvim answers");
+                let invoked = update(&mut m, review_invoke(verb));
+                assert!(invoked.is_empty(), "{verb}: {invoked:?}");
+                assert_eq!(
+                    m.ai_panel().pending_diff.as_ref(),
+                    Some(&review),
+                    "{verb}: the live review is untouched"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_review_verb_typed_after_the_drain_decides_the_review() {
+        let mut m = recorded();
+        m.ai_enabled = true;
+        m.ai_trusted = true;
+        let _ = update(&mut m, key("x"));
+        m.dvr.note_frame(10, 2);
+        let _ = pending_review(&mut m);
+        let replayed = branched(&mut m, 10, 12);
+        flushed(&mut m, &replayed);
+        assert!(!m.dvr.draining());
+        let line = "View review leave".to_owned();
+        type_line(&mut m, &line);
+        let _ = update(&mut m, review_invoke("leave"));
+        let _ = update(&mut m, Msg::CommandLineRan { line });
+        assert!(m.ai_panel().pending_diff.is_none(), "the review is decided");
+    }
+
+    #[test]
+    fn the_drain_ends_with_the_answer_behind_the_last_replayed_input() {
+        let mut m = recorded();
+        for k in ["a", "b", "c"] {
+            let _ = update(&mut m, key(k));
+        }
+        m.dvr.note_frame(10, 2);
+        staged(&mut m, 10);
+        let _ = m.takes_attach();
+        let replay = crate::update::due_replay(&mut m);
+        let resize = replay[3].clone();
+        // `b` and `c` wait in a hold the resize does not
+        let mut flushes = Vec::new();
+        for msg in [replay[0].clone(), resize] {
+            flushes.extend(update(&mut m, msg));
+        }
+        let first = flushes.clone();
+        flushed(&mut m, &first);
+        assert!(m.dvr.draining(), "`b` and `c` still wait in the hold");
+        for msg in [replay[1].clone(), replay[2].clone()] {
+            flushes.extend(update(&mut m, msg));
+        }
+        let _ = update(&mut m, key("x"));
+        let asked: Vec<_> = flushes
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Rpc(RpcCall::FlushReplay { generation }) => Some(*generation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked.len(), 3, "behind the resize, `b` and `c`");
+        flushed(&mut m, &first);
+        assert!(m.dvr.draining(), "the answer before `b` and `c` went out");
+        flushed(&mut m, &flushes);
+        assert!(!m.dvr.draining());
+
+        let logged: Vec<_> = m.dvr.inputs().map(|i| i.body.to_vec()).collect();
+        let engine_order: [&[u8]; 5] = [b"a", &[80, 0, 24, 0], b"b", b"c", b"x"];
+        assert_eq!(logged, engine_order);
+        m.dvr.note_frame(13, 2);
+        let shown = |msgs: &[Msg]| msgs.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>();
+        let resized = Msg::Resized {
+            width: 80,
+            height: 24,
+        };
+        assert_eq!(
+            shown(&m.dvr.replay_until(13)),
+            shown(&[key("a"), resized, key("b"), key("c"), key("x")]),
+            "a second branch sends what the first did"
+        );
     }
 
     #[test]
@@ -925,7 +991,8 @@ mod tests {
             m.dvr.note_frame(frame, 2);
             let _ = update(&mut m, key(k));
         }
-        branched(&mut m, 6, 12);
+        let replayed = branched(&mut m, 6, 12);
+        flushed(&mut m, &replayed);
         assert_eq!(m.dvr.dead(), std::slice::from_ref(&(7..=9)));
         assert_eq!(
             m.dvr.inputs().map(|i| i.body.to_vec()).collect::<Vec<_>>(),
@@ -1128,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn replayed_dvr_keys_are_absorbed() {
+    fn a_dvr_verb_runs_nothing_until_the_replay_drains() {
         let mut m = recorded();
         for k in [" ", "f", "v"] {
             let _ = update(&mut m, key(k));
@@ -1138,7 +1205,7 @@ mod tests {
         m.dvr.note_frame(10, 2);
         let _ = update(&mut m, key("x"));
         m.dvr.note_frame(11, 2);
-        branched(&mut m, 11, 11);
+        let replayed = branched(&mut m, 11, 11);
         assert_eq!(
             m.dvr.inputs().count(),
             5,
@@ -1147,12 +1214,13 @@ mod tests {
         let _ = update(&mut m, invoke_msg("scrub"));
         assert!(
             m.dvr.scrub_frame().is_none(),
-            "the scrub the replayed keys open again is absorbed"
+            "the scrub the replayed keys open again runs nothing"
         );
+        flushed(&mut m, &replayed);
         let _ = update(&mut m, invoke_msg("scrub"));
         assert!(
             m.dvr.scrub_frame().is_some(),
-            "a scrub asked for afresh opens"
+            "a scrub asked for after the drain opens"
         );
     }
 
@@ -1300,26 +1368,6 @@ mod tests {
     }
 
     #[test]
-    fn a_verb_run_after_the_input_log_filled_is_never_owed_to_a_branch() {
-        let mut m = recorded();
-        let _ = update(&mut m, key("x"));
-        m.dvr.note_frame(10, 2);
-        // the input that fills the log is the first after frame 10, so
-        // every logged input comes before it
-        let _ = update(&mut m, Msg::Paste("p".repeat(4 << 20)));
-        assert_eq!(m.dvr.overflowed_at(), Some(10));
-        m.dvr.note_frame(12, 2);
-        let _ = update(&mut m, invoke_msg("scrub"));
-        let _ = update(&mut m, key("q"));
-        branched(&mut m, 10, 12);
-        let _ = update(&mut m, invoke_msg("scrub"));
-        assert!(
-            m.dvr.scrub_frame().is_some(),
-            "the first scrub asked for after the branch opens"
-        );
-    }
-
-    #[test]
     fn play_queues_a_clip_and_a_loaded_clip_opens_in_the_scrub() {
         let mut m = recorded();
         let _ = update(&mut m, invoke_msg("play"));
@@ -1370,32 +1418,13 @@ mod tests {
     }
 
     #[test]
-    fn a_replayed_verb_that_never_fires_swallows_one_verb_of_its_word() {
-        let mut m = recorded();
-        let _ = update(&mut m, invoke_msg("scrub"));
-        let _ = update(&mut m, key("q"));
-        let _ = update(&mut m, key("x"));
-        m.dvr.note_frame(10, 2);
-        branched(&mut m, 10, 10);
-        let _ = update(&mut m, key("j"));
-        let _ = update(&mut m, invoke_msg("scrub"));
-        assert!(m.dvr.scrub_frame().is_none(), "the owed scrub is swallowed");
-        assert!(exports(&mut m).is_empty(), "nothing is written");
-        let _ = update(&mut m, invoke_msg("scrub"));
-        assert!(
-            m.dvr.scrub_frame().is_some(),
-            "the next scrub asked for opens"
-        );
-    }
-
-    #[test]
-    fn a_replayed_export_is_absorbed_however_late_it_arrives() {
+    fn a_replayed_export_writes_nothing_however_late_it_arrives() {
         let mut m = recorded();
         let _ = update(&mut m, key("x"));
         let _ = update(&mut m, invoke_msg("export a.vdvr"));
         let _ = exports(&mut m);
         m.dvr.note_frame(10, 2);
-        branched(&mut m, 10, 10);
+        let replayed = branched(&mut m, 10, 10);
         let _ = update(
             &mut m,
             Msg::Resized {
@@ -1405,33 +1434,26 @@ mod tests {
         );
         let _ = update(&mut m, key("j"));
         let _ = update(&mut m, invoke_msg("export a.vdvr"));
+        let _ = update(&mut m, invoke_msg("scrub"));
         assert!(
             exports(&mut m).is_empty(),
             "the replayed export runs nothing"
         );
+        assert!(m.dvr.scrub_frame().is_none(), "nor does any other verb");
+        flushed(&mut m, &replayed);
         let _ = update(&mut m, invoke_msg("export b.vdvr"));
         assert_eq!(exports(&mut m), [Some("b.vdvr".to_owned())]);
     }
 
     #[test]
-    fn a_verb_of_another_word_runs_while_one_is_owed() {
+    fn a_restart_ends_the_drain() {
         let mut m = recorded();
-        let _ = update(&mut m, invoke_msg("export a.vdvr"));
-        let _ = exports(&mut m);
         let _ = update(&mut m, key("x"));
         m.dvr.note_frame(10, 2);
-        branched(&mut m, 10, 10);
+        let _ = branched(&mut m, 10, 10);
+        assert!(m.dvr.draining());
+        m.dvr.note_restart();
         let _ = update(&mut m, invoke_msg("scrub"));
-        assert!(
-            m.dvr.scrub_frame().is_some(),
-            "a scrub opens past an owed export"
-        );
-        let _ = update(&mut m, key("q"));
-        let _ = update(&mut m, invoke_msg("export c.vdvr"));
-        assert_eq!(
-            exports(&mut m),
-            [Some("c.vdvr".to_owned())],
-            "the mismatch dropped what was owed"
-        );
+        assert!(m.dvr.scrub_frame().is_some());
     }
 }

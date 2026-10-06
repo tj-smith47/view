@@ -215,6 +215,11 @@ pub enum Msg {
     },
     /// The session DVR's file work answered.
     DvrIo(crate::native::dvr::DvrIoReply),
+    /// nvim answered [`RpcCall::FlushReplay`] `generation`, so it has run
+    /// every input sent ahead of that request.
+    ReplayFlushed {
+        generation: u64,
+    },
     /// A user reached a native feature, either through one of view's
     /// registered default keys or through the `:View` command. `feature` is
     /// a [`registry`](crate::native::registry) id and `verb` the entry point
@@ -2448,6 +2453,12 @@ pub enum RpcCall {
     /// `nvim_exec_lua` chunk and its `buflisted`-filtered, error-degrades-
     /// to-empty contract.
     ListBuffers {
+        generation: u64,
+    },
+    /// A request nvim answers once it has run the input sent ahead of it,
+    /// behind a branch's replay. The answer comes back as
+    /// [`Msg::ReplayFlushed`] carrying `generation`, error or not.
+    FlushReplay {
         generation: u64,
     },
     /// Looks up `path`'s content through any loaded nvim buffer, for the

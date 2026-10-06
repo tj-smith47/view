@@ -313,15 +313,15 @@ mod tests {
         }
 
         /// Confirms a branch from frame `at` and carries it out as the
-        /// loop does, returning the replacement once its replay has folded
-        /// and `done` holds.
+        /// loop does, returning the replacement once its replay has
+        /// drained and `done` holds.
         fn branch(
             &mut self,
             engine: &mut Engine,
             respawn: &dyn Fn(&[String]) -> EngineConfig,
             bound: Bound<'_>,
             at: u64,
-            done: impl FnMut(&mut Self, &Engine) -> bool,
+            mut done: impl FnMut(&mut Self, &Engine) -> bool,
         ) -> Restarted {
             let fresh = self
                 .start_branch(engine, respawn, bound, at)
@@ -331,7 +331,7 @@ mod tests {
                 &fresh.pump,
                 &fresh.executor,
                 "the branch replays",
-                done,
+                |r, e| !r.model.dvr.has_replay() && !r.model.dvr.draining() && done(r, e),
             );
             fresh
         }
@@ -374,12 +374,8 @@ mod tests {
                 changed: Vec::new(),
                 unverifiable: false,
             });
-            let _ = view_core::update::update(&mut self.model, scrub.clone());
-            if self.model.dvr.scrub_frame().is_none() {
-                // a scrub invoked with no keys behind it is one the last
-                // branch's replay owes, which swallows it once
-                let _ = view_core::update::update(&mut self.model, scrub);
-            }
+            let _ = view_core::update::update(&mut self.model, scrub);
+            assert!(self.model.dvr.scrub_frame().is_some(), "the scrub opens");
             self.model.dvr.show(at);
             let _ = view_core::update::update(&mut self.model, key("b"));
             let _ = view_core::update::update(&mut self.model, checked);
@@ -880,7 +876,7 @@ mod tests {
             &fresh.pump,
             &fresh.executor,
             "the branch types",
-            |_, e| line(e, 1) == "hellXo" && eval(e, "mode()") == "n",
+            |r, e| !r.model.dvr.draining() && line(e, 1) == "hellXo" && eval(e, "mode()") == "n",
         );
 
         let at = rig.frames;
@@ -891,6 +887,107 @@ mod tests {
             at,
             |_, e| line(e, 1) == "hellXo" && eval(e, "mode()") == "n",
         );
+    }
+
+    /// A pending review of two hunks in buffer 1, ready to accept, so a
+    /// decided hunk leaves the review open.
+    fn pending_review(rig: &mut Rig) -> view_core::native::ai_panel::DiffReviewState {
+        use view_core::native::ai_panel::{DiffReviewState, ReviewSync};
+        use view_core::native::diff::Hunk;
+        let hunks = [0, 2].map(|at| Hunk::new((at, at + 1), keys(&["new"]), at, keys(&[""])));
+        let generation = rig.model.next_hidden_generation();
+        let path = PathBuf::from("/w/a.rs");
+        let mut review = DiffReviewState::new(4, path, generation, hunks.to_vec());
+        review.buffer = Some(view_core::msg::BufferHandle(1));
+        review.sync = ReviewSync::Live;
+        rig.model.ai_panel_mut().pending_diff = Some(review.clone());
+        review
+    }
+
+    fn statuses(rig: &Rig) -> Vec<view_core::native::diff::HunkStatus> {
+        let review = rig.model.ai_panel().pending_diff.as_ref();
+        review.map_or_else(Vec::new, |r| r.hunks.iter().map(|h| h.status).collect())
+    }
+
+    #[test]
+    fn a_review_key_replayed_by_a_branch_decides_nothing() {
+        use view_core::native::diff::HunkStatus;
+        let mapped = || {
+            EngineConfig::isolated()
+                .with_arg("--cmd")
+                .with_arg("nnoremap ga <Cmd>View review accept<CR>")
+        };
+        let respawn = |_: &[String]| mapped();
+        let mut rig = Rig::new();
+        let (mut engine, pump, route, ai_route, executor) = rig.launch(mapped());
+        let _ = pending_review(&mut rig);
+        typed(&mut rig, &executor, &keys(&["g", "a"]));
+        rig.settle(&engine, &pump, &executor, "the mapping accepts", |r, _| {
+            statuses(r).first() != Some(&HunkStatus::Fresh)
+        });
+        typed(&mut rig, &executor, &keys(&["x"]));
+        let at = rig.frames;
+        rig.model.ai_panel_mut().pending_diff = None;
+        let other = pending_review(&mut rig);
+
+        let fresh = rig.branch(
+            &mut engine,
+            &respawn,
+            (&route, &ai_route, &executor),
+            at,
+            |_, e| answers(e),
+        );
+        assert_eq!(
+            rig.model.ai_panel().pending_diff.as_ref(),
+            Some(&other),
+            "the replayed key accepts nothing in the pending review"
+        );
+
+        let mut line = keys(&[":"]);
+        line.extend(chars("View review reject"));
+        line.push("<CR>".to_owned());
+        typed(&mut rig, &fresh.executor, &line);
+        rig.settle(
+            &fresh.engine,
+            &fresh.pump,
+            &fresh.executor,
+            "a verb typed after the drain decides the hunk",
+            |r, _| statuses(r).first() == Some(&HunkStatus::Rejected),
+        );
+    }
+
+    #[test]
+    fn a_replayed_export_line_writes_nothing() {
+        let scratch = view_test_support::ScratchDir::new("dvr-branch-export").unwrap();
+        let clip = scratch.path().join("a.vdvr");
+        let respawn = |_: &[String]| EngineConfig::isolated();
+        let mut rig = Rig::new();
+        let (mut engine, pump, route, ai_route, executor) = rig.launch(EngineConfig::isolated());
+        let mut line = keys(&[":"]);
+        line.extend(chars(&format!("View dvr export {}", clip.display())));
+        line.push("<CR>".to_owned());
+        typed(&mut rig, &executor, &line);
+        let exports = |rig: &mut Rig| {
+            std::iter::from_fn(|| rig.model.dvr.take_request())
+                .filter(|r| matches!(r, DvrRequest::Export(_)))
+                .count()
+        };
+        let mut live = 0;
+        rig.settle(&engine, &pump, &executor, "the line exports", |r, _| {
+            live += exports(r);
+            live == 1
+        });
+        typed(&mut rig, &executor, &keys(&["x"]));
+        let at = rig.frames;
+
+        let _fresh = rig.branch(
+            &mut engine,
+            &respawn,
+            (&route, &ai_route, &executor),
+            at,
+            |_, e| answers(e),
+        );
+        assert_eq!(exports(&mut rig), 0, "the replayed line queues no export");
     }
 
     #[test]

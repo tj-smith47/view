@@ -963,6 +963,9 @@ mod tests {
         fn list_buffers(&self, _generation: u64) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn flush_replay(&self, _generation: u64) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn open_native_window(
             &self,
             _surface: view_core::native::geometry::NativeSurface,

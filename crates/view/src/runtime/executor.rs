@@ -388,6 +388,7 @@ impl<E: EngineOps> Executor<E> {
                         self.ops.register_clipboard(channel_id)
                     }
                     RpcCall::ListBuffers { generation } => self.ops.list_buffers(generation),
+                    RpcCall::FlushReplay { generation } => self.ops.flush_replay(generation),
                     RpcCall::OpenNativeWindow {
                         surface,
                         split,
