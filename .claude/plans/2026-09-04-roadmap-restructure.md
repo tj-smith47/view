@@ -421,6 +421,34 @@ code change).
   floor, and require the mode report only after a key that can leave the
   current mode. Each has its test sequence in the review.
 
+**S5a command-line hold, keys typed behind a `:View` line** (2026-10-05 to
+2026-10-06, about 11 h over eight fix rounds c to j, last commit 1adc0084).
+
+- *What holds.* A submitted `:` line naming a view command holds the keys
+  typed behind it until nvim reports the line ran; a prompt releases it; a
+  late report is matched to its own line by sequence; the hold state is
+  cleared when the engine is replaced. The refused, chained and waiting
+  lines pass live 30 of 30 at every round from f on.
+- *What remains.* Six findings of the last review
+  (`task-s5-windowed-open-j-review.md`, each with keys and a fix). J1: with
+  view's report autocmd cleared by a config (`:autocmd! view_line_ran`), a
+  second `:View` line typed during the first one's wait is never reported
+  and never dropped, so every later line of the same text waits its bound
+  (250 ms to 1 s). J2: five same-text lines timed out in one stall let the
+  fifth report end a sixth line's hold. J3: an abbreviation-expanded line
+  reported with no hold standing leaves its entry owed. J4: the
+  registration's answer travels a route that can drop it. J5: keys typed in
+  one burst behind a `:` that nvim reads as insert text wait for the bound
+  unless the line end went out alone. J6: `RpcCall::RegisterCommand` and
+  `EngineHandle::register_command` were renamed in place. Also never built:
+  a user command, function or variable that wraps `:View` arms no hold, and
+  keys typed after a prompt's answer are not held.
+- *Next lever.* The review's fixes as written: send the registration after
+  the release loop with the count as it then stands (J1), read any report as
+  an evicted line's while one is owed (J2), read an unmatched report as the
+  oldest owed line's with or without a hold (J3), and give the answer the
+  never-drop slot `ReplayFlushed` uses (J4).
+
 ## Execution discipline (binding from S1 on)
 
 - **One streak per session.** The harness list carries only the active
