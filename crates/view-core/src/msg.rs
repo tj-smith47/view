@@ -221,6 +221,12 @@ pub enum Msg {
     ReplayFlushed {
         generation: u64,
     },
+    /// The bound on the answer to [`RpcCall::FlushReplay`] `generation`
+    /// elapsed ([`Effect::ScheduleReplayBound`]). A newer flush armed its
+    /// own bound, so this one ends nothing.
+    ReplayUnanswered {
+        generation: u64,
+    },
     /// A user reached a native feature, either through one of view's
     /// registered default keys or through the `:View` command. `feature` is
     /// a [`registry`](crate::native::registry) id and `verb` the entry point
@@ -1652,6 +1658,18 @@ pub enum Effect {
     /// The degrade when a runtime or harness drops this effect: the held
     /// keys wait for the next key typed on that surface.
     ScheduleSequenceExpiry {
+        after: Duration,
+        generation: u64,
+    },
+    /// Arms the bound on the answer to a branch replay's flush: after
+    /// `after` elapses the timer worker sends [`Msg::ReplayUnanswered`]
+    /// into the loop. The same one-shot thread as
+    /// [`Effect::ScheduleSequenceExpiry`].
+    ///
+    /// The degrade when a runtime or harness drops this effect: a flush
+    /// nvim never answers keeps review and DVR commands doing nothing
+    /// until the engine restarts or the next branch.
+    ScheduleReplayBound {
         after: Duration,
         generation: u64,
     },

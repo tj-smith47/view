@@ -702,6 +702,10 @@ impl<E: EngineOps> Executor<E> {
                 );
                 Flow::Continue
             }
+            Effect::ScheduleReplayBound { after, generation } => {
+                self.one_shot("replay-bound", after, Msg::ReplayUnanswered { generation });
+                Flow::Continue
+            }
             // `dispatch` hands this to the native session's record writer
             // before an effect reaches here, since the session holds the
             // path; one that arrives anyway costs a repeated notice next

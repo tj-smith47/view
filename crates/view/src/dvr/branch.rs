@@ -242,11 +242,11 @@ fn restore_in(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let records = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| !path.to_string_lossy().ends_with(FRESH_SUFFIX));
-    for record in records {
+    for record in entries.flatten().map(|entry| entry.path()) {
+        if record.to_string_lossy().ends_with(FRESH_SUFFIX) {
+            remove_abandoned(&record);
+            continue;
+        }
         let Ok(file) = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -265,6 +265,34 @@ fn restore_in(dir: &std::path::Path) {
         drop(file);
         let _ = std::fs::remove_file(&record);
     }
+}
+
+/// How long a record may stand unlocked under its fresh name before a
+/// sweep reads it as left by a view that stopped ahead of its lock. Its
+/// view locks it microseconds after making it.
+const FRESH_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Removes `fresh`, a record no view has locked, once it is older than
+/// [`FRESH_GRACE`]. It names no copy, since a view notes copies only
+/// after its record is locked and renamed.
+fn remove_abandoned(fresh: &std::path::Path) {
+    let old = std::fs::metadata(fresh)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age >= FRESH_GRACE);
+    if !old {
+        return;
+    }
+    let Ok(file) = std::fs::OpenOptions::new().write(true).open(fresh) else {
+        return;
+    };
+    if file.try_lock().is_err() {
+        return;
+    }
+    // a handle still open keeps Windows from removing the file
+    drop(file);
+    let _ = std::fs::remove_file(fresh);
 }
 
 /// Renames `copy` back to its swap, or removes it where the swap stands.
@@ -1102,6 +1130,32 @@ mod tests {
     }
 
     #[test]
+    fn a_record_left_unlocked_under_its_fresh_name_is_swept_once_old() {
+        let scratch = view_test_support::ScratchDir::new("dvr-branch-fresh").unwrap();
+        let records = scratch.path().join("records");
+        std::fs::create_dir_all(&records).unwrap();
+        let plant = |name: &str, age: u64| {
+            let file = std::fs::File::create(records.join(name)).unwrap();
+            let at = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+            file.set_modified(at).unwrap();
+            file
+        };
+        let abandoned = format!("7{FRESH_SUFFIX}");
+        drop(plant(&abandoned, 60));
+        let starting = format!("8{FRESH_SUFFIX}");
+        drop(plant(&starting, 0));
+        let held = format!("9{FRESH_SUFFIX}");
+        let lock = plant(&held, 60);
+        lock.try_lock().unwrap();
+
+        restore_in(&records);
+        let mut left = crate::dvr::io::listed(&records);
+        left.sort();
+        assert_eq!(left, [starting, held], "only the old unlocked one goes");
+        drop(lock);
+    }
+
+    #[test]
     fn branch_closes_the_surfaces_opened_after_the_frame() {
         let scratch = view_test_support::ScratchDir::new("dvr-branch-tree").unwrap();
         let mut rig = Rig::new();
@@ -1291,7 +1345,10 @@ mod tests {
             |_, e| answers(e),
         );
         let told = format!("{:?}", rig.model.engine.messages.entries);
-        assert!(told.contains("wait for the branch's replay"), "{told}");
+        assert!(
+            told.contains("do nothing until the branch's replay finishes; press it again after"),
+            "{told}"
+        );
 
         // nvim sends the scheduled verb ahead of this line's, so a verb
         // the drain let through decides the first hunk before it

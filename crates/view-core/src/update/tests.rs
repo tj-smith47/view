@@ -8502,6 +8502,119 @@ fn a_replayed_key_held_in_a_sequence_drains_until_the_sequence_goes_out() {
     assert!(!m.dvr.draining());
 }
 
+/// The windowed tree a branch replays `keys` into under `timeoutlen`,
+/// `None` for `'timeout'` off, with the replay still to fold.
+fn tree_replaying(keys: &[&str], timeoutlen: Option<Duration>) -> (Model, Vec<Msg>) {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(&mut m, &[], timeoutlen);
+    m.dvr.enable(1 << 20);
+    m.dvr.branched(0, keys.iter().map(|k| key(k)).collect());
+    let replay = m.dvr.take_replay((80, 24));
+    (m, replay)
+}
+
+/// The generations of the replay flushes `effects` asks for, in order.
+fn replay_flushes(effects: &[Effect]) -> Vec<u64> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Rpc(RpcCall::FlushReplay { generation }) => Some(*generation),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A replayed key held as the start of a sequence counts as sent once it
+/// goes out, and the sequence the person's own key starts after it holds
+/// no drain. With `'timeout'` off only the person's next key sends it, so
+/// it counts as sent once it is held.
+#[test]
+fn a_held_replayed_key_counts_as_sent_once_it_goes_out() {
+    let (mut m, replay) = tree_replaying(&[" "], Some(Duration::from_millis(1000)));
+    let folded: Vec<Effect> = replay
+        .into_iter()
+        .flat_map(|msg| update(&mut m, msg))
+        .collect();
+    let closing = replay_flushes(&folded);
+    let _ = update(
+        &mut m,
+        Msg::ReplayFlushed {
+            generation: closing[0],
+        },
+    );
+    assert!(m.dvr.draining(), "the replayed `<Space>` is held");
+    let person = typed(&mut m, &[" "]);
+    assert!(
+        m.submit_hold.holds_sequence(),
+        "the person's `<Space>` is held"
+    );
+    let behind = replay_flushes(&person);
+    assert_eq!(behind.len(), 1, "{person:?}");
+    let _ = update(
+        &mut m,
+        Msg::ReplayFlushed {
+            generation: behind[0],
+        },
+    );
+    assert!(!m.dvr.draining(), "the person's own prefix holds no drain");
+
+    let (mut m, replay) = tree_replaying(&[" "], None);
+    let folded: Vec<Effect> = replay
+        .into_iter()
+        .flat_map(|msg| update(&mut m, msg))
+        .collect();
+    let closing = replay_flushes(&folded);
+    assert_eq!(closing.len(), 1, "{folded:?}");
+    let _ = update(
+        &mut m,
+        Msg::ReplayFlushed {
+            generation: closing[0],
+        },
+    );
+    assert!(m.submit_hold.holds_sequence(), "only the next key sends it");
+    assert!(!m.dvr.draining(), "a key held with no bound counts as sent");
+}
+
+/// A replayed key that completes a held sequence after the closing resize
+/// sends the whole sequence and one flush behind it, whose answer ends the
+/// drain.
+#[test]
+fn a_replayed_key_sending_a_held_sequence_asks_one_flush_behind_it() {
+    let (mut m, replay) = tree_replaying(&[" ", "e"], Some(Duration::from_millis(1000)));
+    let [leader, completes, resize] = <[Msg; 3]>::try_from(replay).unwrap();
+    let mut early = update(&mut m, leader);
+    early.extend(update(&mut m, resize));
+    let closing = replay_flushes(&early);
+    assert_eq!(closing.len(), 1, "{early:?}");
+    let late = update(&mut m, completes);
+    assert_eq!(meta_inputs(&late), [" ", "e"], "{late:?}");
+    let behind = replay_flushes(&late);
+    assert_eq!(behind.len(), 1, "one flush: {late:?}");
+    let sent = late
+        .iter()
+        .rposition(|e| matches!(e, Effect::Rpc(RpcCall::Input { .. })));
+    let flushed = late
+        .iter()
+        .position(|e| matches!(e, Effect::Rpc(RpcCall::FlushReplay { .. })));
+    assert!(flushed > sent, "behind the sequence: {late:?}");
+    let _ = update(
+        &mut m,
+        Msg::ReplayFlushed {
+            generation: closing[0],
+        },
+    );
+    assert!(m.dvr.draining(), "the answer before the sequence went out");
+    let _ = update(
+        &mut m,
+        Msg::ReplayFlushed {
+            generation: behind[0],
+        },
+    );
+    assert!(!m.dvr.draining());
+}
+
 /// The windowed message stream passes a leader default on the same way.
 #[test]
 fn a_leader_default_in_the_windowed_stream_reaches_nvim() {

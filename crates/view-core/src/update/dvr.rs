@@ -2,7 +2,7 @@
 //! the screen shows a recorded frame.
 
 use crate::model::{unsaved_files, unsaved_without_swap, Model, OverlayKind};
-use crate::msg::{Effect, Msg};
+use crate::msg::{Effect, Msg, RpcCall};
 use crate::native::dvr::{BranchRefusal, DvrIoReply, ExportRefusal, ScrubStep};
 use crate::native::prompt::PromptState;
 
@@ -242,7 +242,65 @@ fn agent_waits(model: &Model) -> Vec<&'static str> {
 }
 
 /// What the first review or DVR verb dropped while a replay drains says.
-pub(super) const DRAIN_NOTICE: &str = "view: review and DVR commands wait for the branch's replay";
+pub(super) const DRAIN_NOTICE: &str =
+    "view: review and DVR commands do nothing until the branch's replay finishes; press it again after";
+
+/// What a replay whose answer never came within its bound says.
+pub(super) const UNANSWERED_NOTICE: &str =
+    "view: the answer to the branch's replay never came; review and DVR commands work again";
+
+/// Notes nvim's answer to the replay's flush `generation`.
+pub(super) fn on_flushed(model: &mut Model, generation: u64) -> Vec<Effect> {
+    model.dvr.note_flushed(generation);
+    Vec::new()
+}
+
+/// Ends the drain whose newest flush `generation` went unanswered for its
+/// whole bound, saying so.
+pub(super) fn on_unanswered(model: &mut Model, generation: u64) -> Vec<Effect> {
+    if !model.dvr.note_unanswered(generation) {
+        return Vec::new();
+    }
+    model.dirty = true;
+    model
+        .engine
+        .record_native_notice(UNANSWERED_NOTICE.to_owned(), false)
+}
+
+/// Runs `fold`, the fold of one message, and puts the one flush it owes,
+/// while a replay drains, behind every input it sent, with the bound on
+/// its answer. A flush an inner fold asked for is dropped, since only the
+/// newest one's answer ends the drain.
+pub(super) fn flush_behind(
+    model: &mut Model,
+    fold: impl FnOnce(&mut Model) -> Vec<Effect>,
+) -> Vec<Effect> {
+    let asked = model.dvr.flushes();
+    let mut effects = fold(model);
+    if model.dvr.flushes() == asked {
+        return effects;
+    }
+    effects.retain(|effect| {
+        !matches!(
+            effect,
+            Effect::Rpc(RpcCall::FlushReplay { .. }) | Effect::ScheduleReplayBound { .. }
+        )
+    });
+    if let Some(generation) = model.dvr.flush() {
+        effects.push(Effect::Rpc(RpcCall::FlushReplay { generation }));
+        effects.push(Effect::ScheduleReplayBound {
+            after: REPLAY_ANSWER_BOUND,
+            generation,
+        });
+    }
+    effects
+}
+
+/// How long nvim has to answer a replay's flush before the drain ends
+/// without it: a callback starved behind a prompt, or a failed notify,
+/// would otherwise keep review and DVR commands doing nothing until the
+/// engine restarts.
+const REPLAY_ANSWER_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Runs `fold`, the fold of one input, keeping every effect that reaches
 /// the agent from leaving it while a `replayed` input, or one folded inside
@@ -334,7 +392,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use crate::msg::{Key, MouseInput, RpcCall};
+    use crate::msg::{Key, MouseInput};
     use crate::native::dvr::{DvrRequest, Marker};
     use crate::update::update;
 
@@ -903,6 +961,48 @@ mod tests {
     }
 
     #[test]
+    fn a_replay_whose_answer_never_comes_ends_its_drain_at_the_bound() {
+        let mut m = recorded();
+        let _ = update(&mut m, key("x"));
+        m.dvr.note_frame(10, 2);
+        let replayed = branched(&mut m, 10, 12);
+        let bounds: Vec<u64> = replayed
+            .iter()
+            .filter_map(|e| match e {
+                Effect::ScheduleReplayBound { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bounds.len(), 1, "{replayed:?}");
+        let stale = update(
+            &mut m,
+            Msg::ReplayUnanswered {
+                generation: bounds[0].wrapping_sub(1),
+            },
+        );
+        assert!(stale.is_empty(), "{stale:?}");
+        assert!(m.dvr.draining(), "an older bound ends nothing");
+        let _ = update(
+            &mut m,
+            Msg::ReplayUnanswered {
+                generation: bounds[0],
+            },
+        );
+        assert!(
+            !m.dvr.draining(),
+            "the answer is not waited for past the bound"
+        );
+        assert_eq!(told(&m, UNANSWERED_NOTICE), 1);
+        let _ = update(
+            &mut m,
+            Msg::ReplayUnanswered {
+                generation: bounds[0],
+            },
+        );
+        assert_eq!(told(&m, UNANSWERED_NOTICE), 1, "said once");
+    }
+
+    #[test]
     fn a_review_verb_typed_after_the_drain_decides_the_review() {
         let mut m = recorded();
         m.ai_enabled = true;
@@ -918,6 +1018,50 @@ mod tests {
         let _ = update(&mut m, review_invoke("leave"));
         let _ = update(&mut m, Msg::CommandLineRan { line });
         assert!(m.ai_panel().pending_diff.is_none(), "the review is decided");
+    }
+
+    #[test]
+    fn replayed_keys_a_hold_releases_after_the_resize_ask_one_flush_behind_them() {
+        let mut m = recorded();
+        let line = "View review leave".to_owned();
+        type_line(&mut m, &line);
+        for k in ["j", "k"] {
+            let _ = update(&mut m, key(k));
+        }
+        let _ = update(&mut m, Msg::CommandLineRan { line: line.clone() });
+        m.dvr.note_frame(10, 2);
+        staged(&mut m, 10);
+        let _ = m.takes_attach();
+        let mut folded = Vec::new();
+        for msg in crate::update::due_replay(&mut m) {
+            folded.extend(update(&mut m, msg));
+        }
+        let sent = |effects: &[Effect]| -> Vec<String> {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::Rpc(RpcCall::Input { notation }) => Some(notation.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(!sent(&folded).contains(&"j".to_owned()), "{folded:?}");
+        let released = update(&mut m, Msg::CommandLineRan { line });
+        assert_eq!(sent(&released), ["j", "k"], "{released:?}");
+        let flushes: Vec<usize> = released
+            .iter()
+            .enumerate()
+            .filter_map(|(at, e)| {
+                matches!(e, Effect::Rpc(RpcCall::FlushReplay { .. })).then_some(at)
+            })
+            .collect();
+        assert_eq!(flushes.len(), 1, "one flush: {released:?}");
+        let last_input = released
+            .iter()
+            .rposition(|e| matches!(e, Effect::Rpc(RpcCall::Input { .. })));
+        assert!(Some(flushes[0]) > last_input, "behind them: {released:?}");
+        flushed(&mut m, &released);
+        assert!(!m.dvr.draining());
     }
 
     #[test]

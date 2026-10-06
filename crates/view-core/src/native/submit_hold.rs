@@ -900,6 +900,12 @@ impl SubmitHold {
         !self.sequence.is_empty()
     }
 
+    /// Whether nvim's `'timeout'` is off, so a held sequence waits for the
+    /// next key with no bound.
+    pub(crate) fn untimed(&self) -> bool {
+        self.timeout_off
+    }
+
     /// Hands back the keys a surface is holding, leaving none held.
     pub(crate) fn take_sequence(&mut self) -> Vec<String> {
         std::mem::take(&mut self.sequence)

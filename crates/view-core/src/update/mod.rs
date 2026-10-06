@@ -176,6 +176,10 @@ pub fn tell_taken_over(
 /// the boundary as a returned [`Effect`] instead of being performed here.
 #[must_use]
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
+    dvr::flush_behind(model, |model| update_input(model, msg))
+}
+
+fn update_input(model: &mut Model, msg: Msg) -> Vec<Effect> {
     let (msg, replayed) = match msg {
         Msg::Replayed(inner) => (*inner, true),
         msg => (msg, false),
@@ -208,7 +212,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     if !replayed && model.dvr.is_recording() && !route::answers_a_view_prompt(model, &msg) {
         effects.extend(dvr::record(model, &msg));
     }
-    let flush = model.dvr.note_sent(&msg, replayed);
+    model.dvr.note_sent(&msg, replayed);
     let releases = crate::native::submit_hold::releases(model, &msg);
     if let Some(armed) = crate::native::submit_hold::note_line_msg(model, &msg) {
         effects.push(Effect::Rpc(RpcCall::RestoreLineReport { armed }));
@@ -216,7 +220,6 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     effects.extend(dvr::fold_replayed(model, replayed, |model| {
         update_one(model, msg)
     }));
-    effects.extend(flush.map(|generation| Effect::Rpc(RpcCall::FlushReplay { generation })));
     // replayed after the command has run, so the focus it set routes them,
     // or once it stops at a prompt they answer. A replayed `:View` submit
     // arms a fresh hold, which the rest are then kept behind in order
@@ -225,10 +228,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             effects.extend(update(model, held));
         }
     }
-    if !model.submit_hold.holds_sequence() {
-        let flush = model.dvr.release_sequenced();
-        effects.extend(flush.map(|generation| Effect::Rpc(RpcCall::FlushReplay { generation })));
-    }
+    model.dvr.note_sequence(model.submit_hold.holds_sequence());
     effects
 }
 
@@ -665,10 +665,8 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             observed_for,
         } => note_engine_liveness(model, wedge, observed_for),
         Msg::DvrIo(reply) => dvr::on_io(model, &reply),
-        Msg::ReplayFlushed { generation } => {
-            model.dvr.note_flushed(generation);
-            Vec::new()
-        }
+        Msg::ReplayFlushed { generation } => dvr::on_flushed(model, generation),
+        Msg::ReplayUnanswered { generation } => dvr::on_unanswered(model, generation),
         Msg::FeatureInvoke { feature, verb, .. } => {
             // A bare `:View <feature>` (no verb) means "just open it":
             // resolved to the feature's own first `default_maps()` entry

@@ -570,7 +570,9 @@ fn sequence_key(
     keys.push(notation);
     match model.submit_hold.sequence(&keys, passes_user_keys(model)) {
         Sequence::Prefix => {
-            model.dvr.hold_sequenced();
+            let carried = keys.len() > 1;
+            let untimed = model.submit_hold.untimed();
+            model.dvr.hold_sequenced(carried, untimed);
             model.submit_hold.keep_sequence(keys)
         }
         Sequence::Neither => {

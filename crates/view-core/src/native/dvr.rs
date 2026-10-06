@@ -261,9 +261,9 @@ pub struct Dvr {
     /// reached the engine yet. Input logged meanwhile goes ahead of them,
     /// since the engine gets it first.
     unfolded: usize,
-    /// How many replayed keys a surface holds as the start of a mapped
-    /// sequence, which reach the engine only once the sequence resolves.
-    sequenced: usize,
+    /// Whether a surface holds a replayed key as the start of a mapped
+    /// sequence, which reaches the engine only once the sequence resolves.
+    sequenced: bool,
     /// Whether this drain has said that it drops review and DVR verbs.
     told_drop: bool,
     /// The clip the scrub shows in place of the recording.
@@ -576,55 +576,87 @@ impl Dvr {
         replay
     }
 
-    /// Notes that an input went to the engine, `replayed` or not, and
-    /// returns the flush to send behind it while the replay drains: one
-    /// behind the closing resize, and one behind each replayed input a
-    /// hold sent after it.
-    pub(crate) fn note_sent(&mut self, msg: &Msg, replayed: bool) -> Option<u64> {
+    /// Notes that an input went to the engine, `replayed` or not, asking
+    /// for a flush behind it while the replay drains: behind the closing
+    /// resize, and behind each replayed input a hold sent after it.
+    pub(crate) fn note_sent(&mut self, msg: &Msg, replayed: bool) {
         if replayed {
             self.unfolded = self.unfolded.saturating_sub(1);
         }
         let closing = !replayed && self.flush.is_none() && matches!(msg, Msg::Resized { .. });
         let late = replayed && self.flush.is_some();
-        if !self.draining || !(closing || late) {
-            return None;
+        if self.draining && (closing || late) {
+            self.ask_flush();
         }
+    }
+
+    /// The flush asked for last while the replay drains, whose answer ends
+    /// it.
+    #[must_use]
+    pub fn flush(&self) -> Option<u64> {
+        self.flush
+    }
+
+    /// How many flushes have been asked for, which moves with each one.
+    #[must_use]
+    pub fn flushes(&self) -> u64 {
+        self.flushes
+    }
+
+    fn ask_flush(&mut self) {
         self.flushes += 1;
         self.flush = Some(self.flushes);
-        self.flush
+    }
+
+    /// Whether every replayed input has gone to the engine and the flush
+    /// behind the last of them is `generation`.
+    fn sent_all(&self, generation: u64) -> bool {
+        self.flush == Some(generation) && self.unfolded == 0 && !self.sequenced
     }
 
     /// Notes nvim's answer to flush `generation`, which ends the drain
     /// when it is the newest one sent and no replayed input waits in a
     /// hold.
     pub(crate) fn note_flushed(&mut self, generation: u64) {
-        if self.flush == Some(generation) && self.unfolded == 0 && self.sequenced == 0 {
+        if self.sent_all(generation) {
             self.end_drain();
         }
     }
 
-    /// Notes that the key being folded stays in a surface's sequence
-    /// buffer, so a replayed one has not reached the engine yet.
-    pub(crate) fn hold_sequenced(&mut self) {
-        if self.replaying {
-            self.sequenced += 1;
+    /// Notes that the answer to flush `generation` never came within its
+    /// bound, which ends the drain on the terms an answer would. Returns
+    /// whether it did.
+    pub(crate) fn note_unanswered(&mut self, generation: u64) -> bool {
+        let ends = self.draining && self.sent_all(generation);
+        if ends {
+            self.end_drain();
+        }
+        ends
+    }
+
+    /// Notes that a surface holds the key being folded as the start of a
+    /// sequence, `carried` behind the keys it held already. A replayed key
+    /// held there has not reached the engine, unless `untimed`, where only
+    /// the person's next key sends it. A sequence that does not carry the
+    /// held keys sent or dropped them, which asks for a flush behind them.
+    pub(crate) fn hold_sequenced(&mut self, carried: bool, untimed: bool) {
+        let held = self.sequenced;
+        self.sequenced = !untimed && (self.replaying || (carried && held));
+        if held && !self.sequenced && self.draining && self.flush.is_some() {
+            self.ask_flush();
         }
     }
 
-    /// Notes that the surface's sequence buffer has emptied, sending or
-    /// dropping every replayed key it held, and returns the flush to send
-    /// behind them while the replay drains.
-    pub(crate) fn release_sequenced(&mut self) -> Option<u64> {
-        if self.sequenced == 0 {
-            return None;
+    /// Notes whether a surface still `holds` a sequence once a message is
+    /// folded. An empty buffer sent or dropped every replayed key it held,
+    /// which asks for a flush behind them.
+    pub(crate) fn note_sequence(&mut self, holds: bool) {
+        if holds || !std::mem::take(&mut self.sequenced) {
+            return;
         }
-        self.sequenced = 0;
-        if !self.draining || self.flush.is_none() {
-            return None;
+        if self.draining && self.flush.is_some() {
+            self.ask_flush();
         }
-        self.flushes += 1;
-        self.flush = Some(self.flushes);
-        self.flush
     }
 
     /// Whether a review or DVR verb dropped now is the drain's first,
@@ -636,7 +668,7 @@ impl Dvr {
     fn end_drain(&mut self) {
         self.draining = false;
         self.flush = None;
-        self.sequenced = 0;
+        self.sequenced = false;
     }
 
     /// Whether a replay's inputs may still be running in the engine, so a
@@ -1011,12 +1043,10 @@ mod tests {
         // as `update` folds them: a replayed input is logged already
         for msg in &replay {
             match msg {
-                Msg::Replayed(inner) => {
-                    let _ = dvr.note_sent(inner, true);
-                }
+                Msg::Replayed(inner) => dvr.note_sent(inner, true),
                 msg => {
                     dvr.record(msg);
-                    let _ = dvr.note_sent(msg, false);
+                    dvr.note_sent(msg, false);
                 }
             }
         }
