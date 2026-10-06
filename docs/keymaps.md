@@ -934,11 +934,12 @@ fresh editor starts are typed after the replay. Review and recording
 commands do nothing until the replay has finished. The first one says so,
 and you press it again after. If the editor has not said the replay
 finished a few seconds after its last key, view says so once and keeps
-waiting. If the fresh editor cannot start, view restarts the editor and
-offers the unsaved text back from its swap files, and a notice says when
-view could not keep one. If view quits during a branch, the next view you start
-puts the swap files back. Under `--remote` the swap files are on the other
-machine, so the confirm says the unsaved text is lost if the branch fails.
+waiting. The wait ends when the editor answers or is restarted. If the fresh
+editor cannot start, view restarts the editor and offers the unsaved text
+back from its swap files, and a notice says when view could not keep one. If
+view quits during a branch, the next view you start puts the swap files
+back. Under `--remote` the swap files are on the other machine, so the
+confirm says the unsaved text is lost if the branch fails.
 
 Once the input log reaches its share of `[dvr] max_mb`, view says so once,
 and frames painted after that point cannot be branched from.
