@@ -596,6 +596,13 @@ pub enum Msg {
     SubmitHoldExpired {
         generation: u64,
     },
+    /// The slowest recent round trip has passed since a `:View` line nvim
+    /// had not shown open went out ([`Effect::ScheduleSubmitSettle`]), so
+    /// the last batch nvim sent answers every key up to its `<CR>`.
+    /// `generation` is the hold's own, as for [`Msg::SubmitHoldExpired`].
+    SubmitHoldSettle {
+        generation: u64,
+    },
     /// nvim answered an open [`RpcCall::OpenPicked`] asked for, so the
     /// input held behind it goes to the file it opened. `generation` is
     /// the call's own, echoed back.
@@ -1610,6 +1617,18 @@ pub enum Effect {
     /// that never reports back keeps its input held until the next one
     /// does.
     ScheduleSubmitHold {
+        after: Duration,
+        generation: u64,
+    },
+    /// Arms the wake on input held behind a `:View` line nvim had not shown
+    /// open by its `<CR>`: after `after`, the slowest recent round trip,
+    /// the timer worker sends [`Msg::SubmitHoldSettle`] into the loop. The
+    /// same one-shot thread as [`Effect::ScheduleSubmitHold`].
+    ///
+    /// The degrade when a runtime or harness drops this effect: a `:` nvim
+    /// read as text in one batch keeps the keys behind it held until the
+    /// hold's bound.
+    ScheduleSubmitSettle {
         after: Duration,
         generation: u64,
     },

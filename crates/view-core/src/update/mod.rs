@@ -949,7 +949,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // reads this message at the same dispatch
         Msg::ChordHoldExpired { .. } => Vec::new(),
         // `update` releases the hold around this dispatch
-        Msg::SubmitHoldExpired { .. } => Vec::new(),
+        Msg::SubmitHoldExpired { .. } | Msg::SubmitHoldSettle { .. } => Vec::new(),
         Msg::PickedOpened { generation, window } => {
             // an answer naming no window is read as landing where view
             // reads the cursor now, which releases the keys at once

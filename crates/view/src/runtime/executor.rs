@@ -689,6 +689,10 @@ impl<E: EngineOps> Executor<E> {
                 self.one_shot("submit-hold", after, Msg::SubmitHoldExpired { generation });
                 Flow::Continue
             }
+            Effect::ScheduleSubmitSettle { after, generation } => {
+                self.one_shot("submit-settle", after, Msg::SubmitHoldSettle { generation });
+                Flow::Continue
+            }
             Effect::ScheduleSequenceExpiry { after, generation } => {
                 self.one_shot(
                     "sequence-expiry",

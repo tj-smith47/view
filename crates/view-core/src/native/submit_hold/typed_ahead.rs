@@ -127,16 +127,29 @@ pub(super) fn settle(hold: &mut SubmitHold, now: SpecStamp, floor: Option<Durati
     {
         return;
     }
-    let owes = |key: &str| CMDLINE_LITERAL_KEYS.contains(&key) && !LEAVES_NORMAL.contains(&key);
-    let owed = hold.argument_of.is_some()
-        || hold
-            .recent
-            .back()
-            .is_some_and(|newest| newest.argument || owes(newest.key.as_str()));
-    if !(hold.doubt && owed) {
+    if !(hold.doubt && owed(hold)) {
         hold.unsettled = false;
         hold.doubt = false;
     }
+}
+
+/// Whether the newest key nvim reads as an argument, or holds while it
+/// waits for one.
+fn owed(hold: &SubmitHold) -> bool {
+    let owes = |key: &str| CMDLINE_LITERAL_KEYS.contains(&key) && !LEAVES_NORMAL.contains(&key);
+    hold.argument_of.is_some()
+        || hold
+            .recent
+            .back()
+            .is_some_and(|newest| newest.argument || owes(newest.key.as_str()))
+}
+
+/// Whether the wake a `<CR>` armed the slowest recent round trip after it
+/// went out may settle the hold. The answer to every key up to the `<CR>`
+/// has arrived by then, so the newest batch answers them all. Under a
+/// doubt the wake waits until nothing is owed, as [`settle`] does.
+pub(super) fn settles_at_wake(hold: &SubmitHold) -> bool {
+    !(hold.doubt && owed(hold))
 }
 
 /// Whether the latest keys of `recent`, read from a key nvim starts a
