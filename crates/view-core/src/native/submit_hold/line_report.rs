@@ -1,11 +1,10 @@
 //! The line a `<CR>` submits, and what nvim tells view about it after: the
 //! report that the line has run, and a prompt the line stopped at.
 
-use super::{in_flight, Armed, Line, State, SubmitHold, Typed, WordEnd};
+use super::{in_flight, names_view, Armed, Line, State, SubmitHold, Typed, WordEnd};
 use crate::events::UiEvent;
 use crate::model::Model;
 use crate::msg::Msg;
-use crate::native::speculate::SpecStamp;
 
 /// How many characters of a submitted line nvim's report carries and a
 /// command hold compares. A line longer than this is matched on these
@@ -50,60 +49,38 @@ pub fn shows_a_prompt(event: &UiEvent) -> bool {
 #[derive(Debug, Clone)]
 pub(super) struct Unreported {
     pub(super) line: String,
-    /// Whether the prompt the line stopped at may still stand.
-    at_prompt: bool,
-    /// When nvim moved past the line: the first key sent after its bound,
-    /// or the batch that closed its prompt. nvim reports a line before it
-    /// reads the next key, so a batch answering input after this says the
-    /// report has come or never will.
-    passed: Option<SpecStamp>,
+    /// The line's place among the lines a hold armed, counted from the
+    /// session's first.
+    seq: u64,
 }
 
 impl SubmitHold {
-    /// Notes nvim's report of `line`, which spends the oldest timed-out
-    /// line it is the report of.
+    /// Notes nvim's report of `line`, which is the report of the oldest
+    /// timed-out line of its text, else of the armed line where it is that
+    /// line's. nvim reports lines in the order they were submitted, so the
+    /// timed-out lines armed before the line it reports are forgotten with
+    /// it: their reports have come or never will.
     pub(crate) fn note_line_reported(&mut self, line: &str) {
-        if let Some(at) = self
-            .timed_out
-            .iter()
-            .position(|old| same_line(&old.line, line))
-        {
-            self.timed_out.remove(at);
-        }
+        let reported = match self.timed_out.iter().find(|old| same_line(&old.line, line)) {
+            Some(old) => old.seq,
+            None if self.reports_armed(line) => self.lines_armed,
+            None => return,
+        };
+        self.timed_out.retain(|old| old.seq > reported);
+    }
+
+    /// Whether `line`, matching no timed-out line, is the report of the
+    /// line the newest hold armed: its text, or a view command while that
+    /// hold stands, as [`SubmitHold::ended_by`] reads it.
+    fn reports_armed(&self, line: &str) -> bool {
+        !self.armed_line.is_empty()
+            && (same_line(&self.armed_line, line)
+                || matches!(self.held, Some((Armed::Command, _))) && names_view(line))
     }
 
     /// Whether `line` is the report of a timed-out line.
     pub(super) fn reports_timed_out(&self, line: &str) -> bool {
         self.timed_out.iter().any(|old| same_line(&old.line, line))
-    }
-
-    /// Notes a key going to nvim at `now`, which nvim reads only once every
-    /// timed-out line stopped at no prompt has run.
-    pub(super) fn note_key_after_lines(&mut self, now: SpecStamp) {
-        for old in &mut self.timed_out {
-            if !old.at_prompt && old.passed.is_none() {
-                old.passed = Some(now);
-            }
-        }
-    }
-
-    /// Notes a redraw batch arriving at `now`, which `answers` a key or
-    /// `closes` a prompt (a command line hidden, the mode back to normal).
-    /// A timed-out line nvim has moved past is forgotten on an answer
-    /// arriving after that, since nvim has reported it by then or never
-    /// will.
-    pub(crate) fn note_batch_after_lines(&mut self, now: SpecStamp, answers: bool, closes: bool) {
-        if answers {
-            self.timed_out
-                .retain(|old| old.passed.is_none_or(|passed| now <= passed));
-        }
-        if closes {
-            for old in &mut self.timed_out {
-                if std::mem::take(&mut old.at_prompt) {
-                    old.passed = Some(now);
-                }
-            }
-        }
     }
 }
 
@@ -131,8 +108,7 @@ pub fn note_line_bound(model: &mut Model, msg: &Msg) -> bool {
         }
         hold.timed_out.push_back(Unreported {
             line: std::mem::take(&mut hold.armed_line),
-            at_prompt: prompted,
-            passed: None,
+            seq: hold.lines_armed,
         });
     }
     bounds

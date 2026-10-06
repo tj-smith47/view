@@ -985,10 +985,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     let mut shows_cmdline = false;
     let mut answers_input = false;
     let mut refused = false;
-    let mut closes_prompt = false;
     for ev in redraw {
-        closes_prompt |= matches!(ev, UiEvent::CmdlineHide { .. })
-            || matches!(ev, UiEvent::ModeChange { mode, .. } if mode == "normal");
         match ev {
             UiEvent::GridCursorGoto { grid, .. } => {
                 // a command waiting on its argument is finished by a cursor
@@ -1028,9 +1025,6 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     if refused {
         model.submit_hold.note_refused();
     }
-    model
-        .submit_hold
-        .note_batch_after_lines(now, answers_input, closes_prompt);
     if answers_input {
         let floor = slowest_trip(model);
         model.submit_hold.note_input_answered(now, floor, settled);

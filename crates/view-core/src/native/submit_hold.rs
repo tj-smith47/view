@@ -332,9 +332,11 @@ pub struct SubmitHold {
     armed_unshown: bool,
     /// The newest lines whose hold ended at its bound or a prompt with no
     /// report, at most [`TIMED_OUT_KEPT`], oldest first, kept until nvim
-    /// has answered a key read after them. The first report of one of
+    /// reports them or a line armed after them. The first report of one of
     /// their texts is that line's.
     timed_out: std::collections::VecDeque<line_report::Unreported>,
+    /// How many lines a command hold has armed.
+    lines_armed: u64,
     generation: u64,
     /// Every key sequence nvim runs a view invocation on.
     invoke_keys: Vec<Invocation>,
@@ -760,8 +762,7 @@ impl SubmitHold {
     }
 
     /// Stamps a line end folded from the key now going to nvim at `now`,
-    /// the key itself, the key as `sent` where it unsettled the hold, and
-    /// the timed-out lines nvim reads it after.
+    /// the key itself, and the key as `sent` where it unsettled the hold.
     ///
     /// The key goes out apart where it is the first, where it goes out at
     /// least `floor` after the key before it, or, before any round trip is
@@ -787,7 +788,6 @@ impl SubmitHold {
         };
         self.key_alone = apart || (self.key_alone && answered);
         self.last_key = Some(now);
-        self.note_key_after_lines(now);
         if self.unsettled && self.sent.is_none() {
             self.sent = Some(now);
             self.sent_apart = apart;
@@ -940,9 +940,9 @@ impl SubmitHold {
     /// (an `<expr>` abbreviation, a completion). A report naming no view
     /// command is a line submitted before this one that armed none. The
     /// late report of a line whose hold ended at its bound or a prompt ends
-    /// none, whatever text it shares with this line: nvim reports that
-    /// line first, and it is forgotten once nvim answers a key read after
-    /// it.
+    /// none, whatever text it shares with this line: nvim reports lines in
+    /// the order they were submitted, whatever keys it has read since, so
+    /// the older line's report comes first.
     fn ended_by(&self, msg: &Msg, mode: &str) -> bool {
         let Some((armed, _)) = &self.held else {
             return false;
@@ -960,7 +960,7 @@ impl SubmitHold {
                     && *generation == self.generation
                     && self.armed_unshown
                     && typed_ahead::settles_at_wake(self)
-                    && self.reported_since_sent()
+                    && self.reported_since_end()
                     && TYPES_TEXT.contains(&mode)
             }
             Msg::Redraw(events) => {
@@ -1007,6 +1007,13 @@ impl SubmitHold {
         self.mode_reported
             .zip(self.sent)
             .is_some_and(|(reported, sent)| reported >= sent)
+    }
+
+    /// Whether nvim reported a mode since the newest line end went out.
+    fn reported_since_end(&self) -> bool {
+        self.mode_reported
+            .zip(self.ended_at)
+            .is_some_and(|(reported, ended)| reported >= ended)
     }
 
     /// Notes nvim's answer to the open carrying `generation`, which left
@@ -1482,6 +1489,7 @@ pub(crate) fn hold_for_open(model: &mut Model) -> (u64, Vec<Effect>) {
 /// or not.
 fn arm_line(model: &mut Model, line: String, opened: bool) -> Vec<Effect> {
     let mut effects = arm(model, Armed::Command);
+    model.submit_hold.lines_armed = model.submit_hold.lines_armed.wrapping_add(1);
     model.submit_hold.armed_line = line;
     model.submit_hold.armed_unshown = !opened;
     // a `:` read as text may be answered in one batch too soon after the
@@ -2272,10 +2280,10 @@ mod tests {
     }
 
     /// The late report of a line whose hold ended at its bound leaves a
-    /// newer line's hold standing, and the newer line's own report then
-    /// ends it. Two `:View tree` lines typed during one stall release the
-    /// keys behind the second on the second report, since nvim reports the
-    /// first line first.
+    /// newer line's hold standing, whatever nvim draws before it, and the
+    /// newer line's own report then ends it. Two `:View tree` lines typed
+    /// during one stall release the keys behind the second on the second
+    /// report, since nvim reports the first line first.
     #[test]
     fn a_late_report_of_a_timed_out_line_leaves_the_newer_hold_standing() {
         for (first, second) in [("View one", "View two"), ("View tree", "View tree")] {
@@ -2285,6 +2293,9 @@ mod tests {
             let bound = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
             assert_eq!(inputs(&bound), ["x"], "{second}");
             submit(&mut model, second);
+            let mut answer = timer_redraw();
+            answer.push(mode("normal"));
+            let _ = redraw_at(&mut model, answer, 10_000);
             let late = crate::update::update(&mut model, line_ran(first));
             assert!(inputs(&late).is_empty(), "{second}: {late:?}");
             assert!(model.submit_hold.is_holding(), "{second}");
@@ -2294,10 +2305,12 @@ mod tests {
     }
 
     /// A config that clears view's report (`:autocmd! view_line_ran`)
-    /// costs the next `:View tree` line its bound, and the lines after it,
-    /// reported again, release on their own reports.
+    /// costs the `:View tree` lines after it their bound, since each report
+    /// of that text may be the older line's, and the keys behind each go
+    /// out at it. A line of another text releases on its own report and
+    /// forgets every line before it, so the next `:View tree` does too.
     #[test]
-    fn a_line_nvim_never_reported_delays_no_later_line() {
+    fn a_line_nvim_never_reported_delays_only_lines_of_its_text() {
         let mut model = normal_mode();
         let clear = line_keys("autocmd! view_line_ran");
         let sent = type_keys(
@@ -2311,14 +2324,23 @@ mod tests {
         let bound = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
         assert_eq!(inputs(&bound), ["x"]);
         let mut at = 1_000;
-        for round in [2, 3] {
-            let mut keys = line_keys("View tree");
+        for (line, waits) in [
+            ("View tree", true),
+            ("View picker files", false),
+            ("View tree", false),
+        ] {
+            let mut keys = line_keys(line);
             keys.push("x".to_string());
             at = type_at(&mut model, &keys, at, true);
-            assert!(model.submit_hold.is_holding(), "line {round}");
-            let own = crate::update::update(&mut model, line_ran("View tree"));
-            assert_eq!(inputs(&own), ["x"], "line {round}: {own:?}");
-            assert!(!model.submit_hold.is_holding(), "line {round}");
+            assert!(model.submit_hold.is_holding(), "{line}");
+            let mut own = crate::update::update(&mut model, line_ran(line));
+            assert_eq!(model.submit_hold.is_holding(), waits, "{line}: {own:?}");
+            if waits {
+                let generation = model.submit_hold.generation;
+                own = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
+            }
+            assert_eq!(inputs(&own), ["x"], "{line}: {own:?}");
+            assert!(!model.submit_hold.is_holding(), "{line}");
         }
     }
 
@@ -2350,46 +2372,133 @@ mod tests {
         }
     }
 
-    /// `:call system('sleep 3') | View tree<CR>` times out while nvim is
-    /// blocked, and `:View picker files<CR>abc` is typed before nvim
-    /// returns: the first line's report, however many bounds later, leaves
-    /// `abc` held for the picker's own report. Once nvim answers a key sent
-    /// after a timed-out line, that line is forgotten, and a report of its
-    /// text is read as any other line's.
-    #[test]
-    fn a_late_report_is_told_apart_until_nvim_answers_a_newer_key() {
-        let first = "call system('sleep 3') | View tree";
-        let mut model = normal_mode();
-        let _ = type_at(&mut model, &line_keys(first), 0, true);
-        assert_eq!(waits_for(&model).as_deref(), Some(first));
+    /// Applies `batch` as nvim's redraw arriving `at` milliseconds into the
+    /// session, and the effects.
+    fn redraw_at(model: &mut Model, batch: Vec<UiEvent>, at: u64) -> Vec<Effect> {
+        let stamp = crate::native::speculate::SpecStamp::new(Duration::from_millis(at));
+        let _ = crate::native::speculate::fold_redraw(model, &batch, stamp);
+        crate::update::update(model, Msg::Redraw(batch))
+    }
+
+    /// A redraw of the cursor's own grid, as a plugin's timer draws it.
+    fn timer_redraw() -> Vec<UiEvent> {
+        vec![
+            UiEvent::GridLine {
+                grid: 1,
+                row: 0,
+                col_start: 0,
+                cells: Vec::new(),
+            },
+            UiEvent::GridCursorGoto {
+                grid: 1,
+                row: 0,
+                col: 0,
+            },
+        ]
+    }
+
+    /// Times out `first` while nvim is busy with it, then types
+    /// `:View picker files<CR>abc` from `at` milliseconds with nvim
+    /// answering none of it, and the time after the last key.
+    fn picker_behind_a_timed_out_line(model: &mut Model, first: &str, at: u64) -> u64 {
+        let _ = type_at(model, &line_keys(first), 0, true);
+        assert_eq!(waits_for(model).as_deref(), Some(first));
         let generation = model.submit_hold.generation;
-        let _ = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
+        let _ = crate::update::update(model, Msg::SubmitHoldExpired { generation });
         let mut keys = line_keys("View picker files");
         keys.extend(["a", "b", "c"].map(String::from));
-        let at = type_at(&mut model, &keys, 1_000, false);
-        assert_eq!(waits_for(&model).as_deref(), Some("View picker files"));
-        age_for_seconds(&mut model, at);
-        let late = crate::update::update(&mut model, line_ran(first));
+        let at = type_at(model, &keys, at, false);
+        assert_eq!(waits_for(model).as_deref(), Some("View picker files"));
+        at
+    }
+
+    /// The first line's report leaves `abc` held, and the picker's own
+    /// report hands `abc` to the picker.
+    fn abc_reaches_the_picker(model: &mut Model, first: &str) {
+        let late = crate::update::update(model, line_ran(first));
         assert!(inputs(&late).is_empty(), "{late:?}");
         assert!(model.submit_hold.is_holding());
-        let own = crate::update::update(&mut model, line_ran("View picker files"));
-        assert_eq!(inputs(&own), ["a", "b", "c"]);
+        let _ = crate::update::update(model, picker_files());
+        let own = crate::update::update(model, line_ran("View picker files"));
+        assert!(inputs(&own).is_empty(), "{own:?}");
+        assert!(
+            own.iter()
+                .any(|e| matches!(e, Effect::PickerQuery { needle, .. } if needle == "abc")),
+            "{own:?}"
+        );
+    }
 
+    /// `:call system('sleep 3') | View tree<CR>` times out while nvim is
+    /// blocked, and `:View picker files<CR>abc` is typed before nvim
+    /// returns. The tree the first line opens and a batch answering a key,
+    /// both applied ahead of that line's report however many bounds later,
+    /// leave `abc` held for the picker.
+    #[test]
+    fn a_late_report_is_told_apart_whatever_nvim_draws_before_it() {
+        let first = "call system('sleep 3') | View tree";
+        let mut model = normal_mode();
+        let at = picker_behind_a_timed_out_line(&mut model, first, 1_000);
+        age_for_seconds(&mut model, at);
+        let tree = Msg::FeatureInvoke {
+            generation: None,
+            feature: "tree".to_string(),
+            verb: String::new(),
+        };
+        let _ = crate::update::update(&mut model, tree);
+        let mut answer = timer_redraw();
+        answer.push(mode("normal"));
+        let _ = redraw_at(&mut model, answer, at + 5_000);
+        abc_reaches_the_picker(&mut model, first);
+    }
+
+    /// `:w | View tree<CR>` runs past its bound while a slow format on save
+    /// pumps events, and a timer redraws the cursor's grid before and after
+    /// `:View picker files<CR>abc` is typed: the line's report leaves `abc`
+    /// held for the picker.
+    #[test]
+    fn a_timer_redraw_during_a_timed_out_line_forgets_nothing() {
+        let first = "w | View tree";
+        let mut model = normal_mode();
+        let _ = redraw_at(&mut model, timer_redraw(), 500);
+        let at = picker_behind_a_timed_out_line(&mut model, first, 1_000);
+        let _ = redraw_at(&mut model, timer_redraw(), at + 100);
+        abc_reaches_the_picker(&mut model, first);
+    }
+
+    /// A timed-out line is forgotten once nvim reports a line armed after
+    /// it, so a later report of its text, from a mapping that expands to
+    /// that line, is read as any other line's.
+    #[test]
+    fn a_report_of_a_newer_line_forgets_the_timed_out_lines_before_it() {
         let mut model = normal_mode();
         submit(&mut model, "View one");
         let generation = model.submit_hold.generation;
         let _ = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
-        let _ = type_at(&mut model, &["j".to_string()], 1_000, true);
         submit(&mut model, "View two");
-        let late = crate::update::update(&mut model, line_ran("View one"));
-        assert_eq!(inputs(&late), ["x"]);
+        let own = crate::update::update(&mut model, line_ran("View two"));
+        assert_eq!(inputs(&own), ["x"]);
+        submit(&mut model, "View three");
+        let mapped = crate::update::update(&mut model, line_ran("View one"));
+        assert_eq!(inputs(&mapped), ["x"]);
+
+        let mut model = normal_mode();
+        for line in ["View one", "View two"] {
+            submit(&mut model, line);
+            let generation = model.submit_hold.generation;
+            let _ = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
+        }
+        submit(&mut model, "View three");
+        let late = crate::update::update(&mut model, line_ran("View two"));
+        assert!(inputs(&late).is_empty(), "{late:?}");
+        let mapped = crate::update::update(&mut model, line_ran("View one"));
+        assert_eq!(inputs(&mapped), ["x"]);
     }
 
     /// `:call input('n: ') | View picker files<CR>` released at its prompt,
     /// the answer typed slower than one bound with nvim answering each key,
     /// then `<CR>:View tree<CR>x` before nvim reports the first line: the
-    /// answers inside the prompt forget nothing, and the first line's
-    /// report, arriving after the prompt closes, leaves `x` held.
+    /// answers inside the prompt and after it closes forget nothing, and
+    /// the first line's report leaves `x` held.
     #[test]
     fn a_line_released_at_its_prompt_is_told_apart_after_a_slow_answer() {
         let first = "call input('n: ') | View picker files";
@@ -2420,6 +2529,8 @@ mod tests {
         let stamp = crate::native::speculate::SpecStamp::new(Duration::from_millis(at));
         let _ = crate::native::speculate::fold_redraw(&mut model, &closed, stamp);
         let _ = crate::update::update(&mut model, Msg::Redraw(closed));
+        assert!(model.submit_hold.is_holding());
+        let _ = redraw_at(&mut model, timer_redraw(), at + 100);
         assert!(model.submit_hold.is_holding());
         let late = crate::update::update(&mut model, line_ran(first));
         assert!(inputs(&late).is_empty(), "{late:?}");
@@ -2540,6 +2651,32 @@ mod tests {
                 "{shown} {stale}: {woken:?}"
             );
         }
+    }
+
+    /// `A<M-:>ttx` typed in one burst on a slow link, where `tt` is a
+    /// `cnoremap` to `View tree<CR>`, with nvim's answer to `A` reporting
+    /// insert mode after the `<M-:>` went out and before the `tt` did, and
+    /// no answer after it: the wake releases nothing, since that mode may
+    /// be one the `<M-:>` left.
+    #[test]
+    fn a_mode_reported_before_the_line_end_settles_nothing_at_its_wake() {
+        let mut model = normal_mode();
+        cmdline_maps(&mut model, &[("tt", "View tree<CR>", false, true, false)]);
+        let _ = send_at(&mut model, "j", 0);
+        let _ = answer_at(&mut model, None, 100);
+        let _ = send_at(&mut model, "A", 200);
+        let _ = send_at(&mut model, "<M-:>", 201);
+        let _ = answer_at(&mut model, Some("insert"), 202);
+        for (key, at) in [("t", 204), ("t", 205)] {
+            let _ = send_at(&mut model, key, at);
+        }
+        assert_eq!(waits_for(&model).as_deref(), Some("View tree"));
+        let held = send_at(&mut model, "x", 206);
+        assert!(inputs(&held).is_empty(), "{held:?}");
+        let generation = model.submit_hold.generation;
+        let woken = crate::update::update(&mut model, Msg::SubmitHoldSettle { generation });
+        assert!(inputs(&woken).is_empty(), "{woken:?}");
+        assert!(model.submit_hold.is_holding());
     }
 
     /// A `:View` line that stops at a prompt (`input()`, a `confirm()`
