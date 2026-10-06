@@ -246,6 +246,11 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         "line_ran" => Some(Msg::CommandLineRan {
             line: first.as_str()?.to_owned(),
         }),
+        // the registration a hold's bound sends, finding the report above
+        // cleared, sent before it puts the report back
+        "line_report_restored" => Some(Msg::LineReportRestored {
+            armed: first.as_u64()?,
+        }),
         // the `:` reading taken again after a plugin loaded late, sent only
         // when it disagrees with the last one: the registration's own answer
         // names only what was mapped when it went out, and a plugin that

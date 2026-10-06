@@ -378,9 +378,11 @@ fn a_hit_enter_prompt_reports_its_line_under_a_ui_drawing_messages() {
 }
 
 /// Clearing view's autocmd group removes the report, and registering the
-/// command again puts it back: the line after the registration is
-/// reported. The clearing line's own report, made before it ran, still
-/// arrives, and it names that line.
+/// command again puts it back and answers that it had been gone, carrying
+/// the count it was sent: the line after the registration is reported. The
+/// clearing line's own report, made before it ran, still arrives, and it
+/// names that line. A registration that finds the report in place answers
+/// nothing.
 #[test]
 fn registering_the_command_again_restores_the_report() {
     let (engine, channel, rx, pump, _cutover) = spawn_attached();
@@ -395,10 +397,17 @@ fn registering_the_command_again_restores_the_report() {
         vec!["invoke one x", "ran autocmd! view_line_ran"],
         "a line was reported with the group cleared"
     );
-    engine.handle.register_command().unwrap();
-    // `nvim_input` reaches typeahead ahead of a queued notification, and
-    // a request is answered only after the notification sent before it
-    engine.handle.eval_str("1").unwrap();
+    for (armed, answered) in [(7, Some(7)), (8, None)] {
+        engine.handle.restore_line_report(armed).unwrap();
+        // a request is answered only after the notification sent before it
+        engine.handle.eval_str("1").unwrap();
+        let restored = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|msg| match msg {
+            Msg::LineReportRestored { armed } => Some(armed),
+            _ => None,
+        });
+        assert_eq!(restored, answered, "registration with {armed} armed");
+    }
+    // `nvim_input` reaches typeahead ahead of a queued notification
     engine.handle.input(":View two x<CR>").unwrap();
     assert_eq!(until_line_ran(&rx), vec!["invoke two x", "ran View two x"]);
 }

@@ -249,6 +249,12 @@ pub enum Msg {
     CommandLineRan {
         line: String,
     },
+    /// nvim's answer to one [`RpcCall::RestoreLineReport`] that found the
+    /// line report cleared: none of the first `armed` lines a command hold
+    /// armed is ever reported.
+    LineReportRestored {
+        armed: u64,
+    },
     /// The async answer to one [`RpcCall::ProbeSwapRecovery`]: what this
     /// connection's engine replayed out of a swap file while it was
     /// starting, whether it wrote its own report about doing so, and the
@@ -2428,10 +2434,15 @@ pub enum RpcCall {
         channel_id: u64,
     },
     /// Registers the `:View` command and its line report again on this
-    /// connection, the same chunk the attach runs. A config that cleared
-    /// view's autocmd group (`:autocmd! view_line_ran`) removed the
+    /// connection, the same chunk the attach runs, once the first `armed`
+    /// lines a command hold armed have been submitted. A config that
+    /// cleared view's autocmd group (`:autocmd! view_line_ran`) removed the
     /// report, and a hold a `:` line armed reaching its bound sends this.
-    RegisterCommand,
+    /// Where the report was gone, nvim answers with
+    /// [`Msg::LineReportRestored`].
+    RestoreLineReport {
+        armed: u64,
+    },
     /// Injects view's `g:clipboard` provider, conditionally: the chunk (see
     /// `view-engine`'s `REGISTER_CLIPBOARD_CHUNK`) checks `vim.g.clipboard`
     /// and only installs view's dict when the user's config left it unset,

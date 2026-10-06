@@ -210,8 +210,8 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     }
     let flush = model.dvr.note_sent(&msg, replayed);
     let releases = crate::native::submit_hold::releases(model, &msg);
-    if crate::native::submit_hold::note_line_bound(model, &msg) {
-        effects.push(Effect::Rpc(RpcCall::RegisterCommand));
+    if let Some(armed) = crate::native::submit_hold::note_line_msg(model, &msg) {
+        effects.push(Effect::Rpc(RpcCall::RestoreLineReport { armed }));
     }
     effects.extend(dvr::fold_replayed(model, replayed, |model| {
         update_one(model, msg)
@@ -967,8 +967,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // the input hold belongs to the binary's native session, which
         // reads this message at the same dispatch
         Msg::ChordHoldExpired { .. } => Vec::new(),
-        // `update` releases the hold around this dispatch
-        Msg::SubmitHoldExpired { .. } | Msg::SubmitHoldSettle { .. } => Vec::new(),
+        // `update` releases the hold, and notes the report's answer, around
+        // this dispatch
+        Msg::SubmitHoldExpired { .. }
+        | Msg::SubmitHoldSettle { .. }
+        | Msg::LineReportRestored { .. } => Vec::new(),
         Msg::PickedOpened { generation, window } => {
             // an answer naming no window is read as landing where view
             // reads the cursor now, which releases the keys at once

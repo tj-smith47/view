@@ -442,8 +442,17 @@ return {
 /// mapping's `<Cmd>` send none. The per-line hooks live in the
 /// `view_line_hooks` group, which a bare `:autocmd!` and this chunk's
 /// own clearing of `view_line_ran` leave in place.
+///
+/// Run with a fourth argument, the count of lines view's holds have armed,
+/// the chunk answers with a `line_report_restored` bridge notification
+/// carrying it where it found the report cleared.
 pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
-local channel, entries, command = ...
+local channel, entries, command, armed = ...
+-- a report found cleared never reached the lines submitted before now
+local ok, kept = pcall(vim.api.nvim_get_autocmds, { group = 'view_line_ran' })
+if armed and not (ok and #kept > 0) then
+  vim.rpcnotify(channel, 'view_bridge', 'line_report_restored', armed)
+end
 vim.api.nvim_create_user_command(command, function(opts)
   local feature = opts.fargs[1] or ''
   local verb = (opts.args:gsub('^%s*%S+%s*', '', 1))
@@ -638,15 +647,17 @@ impl super::EngineHandle {
         )
     }
 
-    /// Runs [`REGISTER_COMMAND_CHUNK`] alone over this connection, which
-    /// puts back the `:View` command and its line report after a config
-    /// has cleared nvim's autocmds. Fire-and-forget: nothing answers it.
+    /// Runs [`REGISTER_COMMAND_CHUNK`] alone over this connection once
+    /// view's holds have armed `armed` lines, which puts back the `:View`
+    /// command and its line report after a config has cleared nvim's
+    /// autocmds. Where the report was gone, nvim answers with
+    /// `Msg::LineReportRestored` carrying `armed`.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Closed` if the connection's writer thread has
     /// already exited.
-    pub fn register_command(&self) -> Result<(), EngineError> {
+    pub fn restore_line_report(&self, armed: u64) -> Result<(), EngineError> {
         self.notify(
             "nvim_exec_lua",
             vec![
@@ -655,6 +666,7 @@ impl super::EngineHandle {
                     Value::from(self.channel_id),
                     Value::Array(command_entry_values()),
                     Value::from(COMMAND),
+                    Value::from(armed),
                 ]),
             ],
         )

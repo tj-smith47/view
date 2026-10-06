@@ -942,7 +942,7 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
-        fn register_command(&self) -> Result<(), view_engine::handle::EngineError> {
+        fn restore_line_report(&self, _armed: u64) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
         fn ui_attach(

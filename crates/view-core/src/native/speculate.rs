@@ -997,7 +997,8 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
             UiEvent::ModeChange { .. } => {
                 settled = true;
                 answers_input = true;
-                model.submit_hold.note_mode_arrived(now);
+                let in_flight = model.engine.key_unanswered.is_some();
+                model.submit_hold.note_mode_arrived(now, in_flight);
             }
             UiEvent::CmdlineShow { .. } => {
                 shows_cmdline = true;

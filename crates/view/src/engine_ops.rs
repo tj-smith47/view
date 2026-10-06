@@ -113,9 +113,10 @@ pub trait EngineOps {
     /// state change view reacts to; never blocks, and never itself returns an
     /// event (see `RpcCall::RegisterBridge`).
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError>;
-    /// Registers the `:View` command and its line report again; never
-    /// blocks, and nothing answers it (see `RpcCall::RegisterCommand`).
-    fn register_command(&self) -> Result<(), EngineError>;
+    /// Registers the `:View` command and its line report again once view's
+    /// holds have armed `armed` lines; never blocks, and never itself
+    /// returns the answer (see `RpcCall::RestoreLineReport`).
+    fn restore_line_report(&self, armed: u64) -> Result<(), EngineError>;
     /// Injects view's `g:clipboard` provider, conditionally on the user's
     /// own config leaving it unset; never blocks, and never itself answers
     /// a paste or copy request (see `RpcCall::RegisterClipboard`).
@@ -425,8 +426,8 @@ impl EngineOps for EngineHandle {
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
         self.register_bridge(channel_id)
     }
-    fn register_command(&self) -> Result<(), EngineError> {
-        self.register_command()
+    fn restore_line_report(&self, armed: u64) -> Result<(), EngineError> {
+        self.restore_line_report(armed)
     }
     fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
         self.register_clipboard(channel_id)
@@ -688,8 +689,8 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
         (**self).register_bridge(channel_id)
     }
-    fn register_command(&self) -> Result<(), EngineError> {
-        (**self).register_command()
+    fn restore_line_report(&self, armed: u64) -> Result<(), EngineError> {
+        (**self).restore_line_report(armed)
     }
     fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
         (**self).register_clipboard(channel_id)
@@ -954,8 +955,8 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
         (**self).register_bridge(channel_id)
     }
-    fn register_command(&self) -> Result<(), EngineError> {
-        (**self).register_command()
+    fn restore_line_report(&self, armed: u64) -> Result<(), EngineError> {
+        (**self).restore_line_report(armed)
     }
     fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
         (**self).register_clipboard(channel_id)
@@ -1281,8 +1282,8 @@ impl EngineOps for FakeOps {
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
         self.record(format!("register_bridge({channel_id})"))
     }
-    fn register_command(&self) -> Result<(), EngineError> {
-        self.record("register_command".to_string())
+    fn restore_line_report(&self, armed: u64) -> Result<(), EngineError> {
+        self.record(format!("restore_line_report({armed})"))
     }
     fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
         self.record(format!("register_clipboard({channel_id})"))
@@ -1611,7 +1612,7 @@ impl EngineOps for SlowOps {
     fn register_bridge(&self, _channel_id: u64) -> Result<(), EngineError> {
         Ok(())
     }
-    fn register_command(&self) -> Result<(), EngineError> {
+    fn restore_line_report(&self, _armed: u64) -> Result<(), EngineError> {
         Ok(())
     }
     fn register_clipboard(&self, _channel_id: u64) -> Result<(), EngineError> {

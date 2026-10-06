@@ -60,44 +60,85 @@ impl SubmitHold {
     /// line's. nvim reports lines in the order they were submitted, so the
     /// timed-out lines armed before the line it reports are forgotten with
     /// it: their reports have come or never will.
+    ///
+    /// A report naming a view command that matches no line by its text,
+    /// while a command hold stands and an older line is owed, is the
+    /// oldest owed line's, whose text nvim expanded, and is spent alone.
     pub(crate) fn note_line_reported(&mut self, line: &str) {
         let reported = match self.timed_out.iter().find(|old| same_line(&old.line, line)) {
             Some(old) => old.seq,
-            None if self.reports_armed(line) => self.lines_armed,
+            None if same_line(&self.armed_line, line) && !self.armed_line.is_empty() => {
+                self.lines_armed
+            }
+            None if matches!(self.held, Some((Armed::Command, _))) && names_view(line) => {
+                if self.evicted > 0 {
+                    self.evicted = self.evicted.saturating_sub(1);
+                    return;
+                }
+                match self.timed_out.pop_front() {
+                    Some(_) => return,
+                    None => self.lines_armed,
+                }
+            }
             None => return,
         };
         self.timed_out.retain(|old| old.seq > reported);
+        self.evicted = 0;
     }
 
-    /// Whether `line`, matching no timed-out line, is the report of the
-    /// line the newest hold armed: its text, or a view command while that
-    /// hold stands, as [`SubmitHold::ended_by`] reads it.
-    fn reports_armed(&self, line: &str) -> bool {
-        !self.armed_line.is_empty()
-            && (same_line(&self.armed_line, line)
-                || matches!(self.held, Some((Armed::Command, _))) && names_view(line))
+    /// Whether a line kept unreported is owed a report, which nvim sends
+    /// ahead of any newer line's.
+    pub(super) fn owes_unreported(&self) -> bool {
+        self.evicted > 0 || !self.timed_out.is_empty()
     }
 
-    /// Whether `line` is the report of a timed-out line.
+    /// Notes nvim's answer to the registration a bound sent once the lines
+    /// up to the `armed`-th had armed: the report had been cleared, so
+    /// none of those lines is ever reported.
+    pub(crate) fn note_report_restored(&mut self, armed: u64) {
+        self.timed_out.retain(|old| old.seq > armed);
+        self.evicted = 0;
+    }
+
+    /// Forgets every line the replaced engine owed a report, since only
+    /// that engine could send one.
+    pub(crate) fn note_engine_replaced(&mut self) {
+        self.timed_out.clear();
+        self.evicted = 0;
+        self.armed_line.clear();
+        self.armed_unshown = false;
+    }
+
+    /// Whether `line` is the report of a timed-out line by its text.
     pub(super) fn reports_timed_out(&self, line: &str) -> bool {
         self.timed_out.iter().any(|old| same_line(&old.line, line))
     }
 }
 
-/// Whether `msg` is the bound of a hold a `:View` line armed, which nvim
-/// has not reported by then.
+/// Notes what `msg` says of the lines owed a report, and returns how many
+/// lines a command hold had armed when `msg` is the bound of a hold a
+/// `:View` line armed, which nvim has not reported by then. An engine
+/// replaced owes nothing, and nvim's answer that the report had been
+/// cleared drops the lines it names.
 ///
 /// The line is kept so its late report ends no newer hold, and so is a
 /// line whose hold `msg` ends at a prompt, which nvim may report once the
 /// prompt is answered. A line still running at its bound (`:make`,
 /// `:!cmd`) reports later, and one whose report a config cleared
 /// (`:autocmd! view_line_ran`) never does, so the bound puts the
-/// registration back, which a running line does not notice.
+/// registration back, which a running line does not notice. The count
+/// rides the registration, which answers with it where the report had
+/// been cleared ([`SubmitHold::note_report_restored`]).
 #[must_use]
-pub fn note_line_bound(model: &mut Model, msg: &Msg) -> bool {
+pub fn note_line_msg(model: &mut Model, msg: &Msg) -> Option<u64> {
     let hold = &mut model.submit_hold;
+    match msg {
+        Msg::EngineAttached => hold.note_engine_replaced(),
+        Msg::LineReportRestored { armed } => hold.note_report_restored(*armed),
+        _ => {}
+    }
     if !matches!(hold.held, Some((Armed::Command, _))) {
-        return false;
+        return None;
     }
     let bounds =
         matches!(msg, Msg::SubmitHoldExpired { generation } if *generation == hold.generation);
@@ -105,13 +146,14 @@ pub fn note_line_bound(model: &mut Model, msg: &Msg) -> bool {
     if bounds || prompted {
         if hold.timed_out.len() == TIMED_OUT_KEPT {
             hold.timed_out.pop_front();
+            hold.evicted = hold.evicted.saturating_add(1);
         }
         hold.timed_out.push_back(Unreported {
             line: std::mem::take(&mut hold.armed_line),
             seq: hold.lines_armed,
         });
     }
-    bounds
+    bounds.then_some(hold.lines_armed)
 }
 
 /// The line a `<CR>` submits, read from the engine's last `cmdline_show`

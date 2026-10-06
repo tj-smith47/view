@@ -383,7 +383,7 @@ impl<E: EngineOps> Executor<E> {
                         self.ops.register_mappings(&specs, channel_id)
                     }
                     RpcCall::RegisterBridge { channel_id } => self.ops.register_bridge(channel_id),
-                    RpcCall::RegisterCommand => self.ops.register_command(),
+                    RpcCall::RestoreLineReport { armed } => self.ops.restore_line_report(armed),
                     RpcCall::RegisterClipboard { channel_id } => {
                         self.ops.register_clipboard(channel_id)
                     }

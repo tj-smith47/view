@@ -133,6 +133,25 @@ pub(super) fn settle(hold: &mut SubmitHold, now: SpecStamp, floor: Option<Durati
     }
 }
 
+impl SubmitHold {
+    /// Notes a batch reporting a mode, arriving at `now`, with a key still
+    /// unanswered when it arrived (`in_flight`) or none. A batch answers
+    /// the newest key where that key went out alone or nothing is in
+    /// flight, and otherwise any key since the oldest one unanswered.
+    pub(crate) fn note_mode_arrived(&mut self, now: SpecStamp, in_flight: bool) {
+        self.mode_reported = Some(now);
+        self.mode_answers = self.last_key.filter(|_| !in_flight || self.key_alone);
+    }
+
+    /// Whether the newest mode nvim reported answers a key sent at or after
+    /// the newest line end.
+    pub(super) fn reported_since_end(&self) -> bool {
+        self.mode_answers
+            .zip(self.ended_at)
+            .is_some_and(|(answers, ended)| answers >= ended)
+    }
+}
+
 /// Whether the newest key nvim reads as an argument, or holds while it
 /// waits for one.
 fn owed(hold: &SubmitHold) -> bool {
