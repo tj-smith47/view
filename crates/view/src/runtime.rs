@@ -1213,6 +1213,7 @@ pub fn run(
     };
     let mut executor = channels.executor(engine.handle.clone(), clipboard_route.epoch());
     let mut write_stall = OutboxStallWatch::default();
+    let mut swap_copies = crate::dvr::branch::SwapCopies::for_this_view();
     let mut supervision = SupervisionFold::default();
     let mut state = LoopState::default();
     let mut reconnect = ReconnectSchedule::default();
@@ -1263,6 +1264,7 @@ pub fn run(
                     &channels,
                     bound,
                     plan,
+                    &mut swap_copies,
                 ),
                 None => restart_engine(&mut engine, respawn, &mut model, &channels, bound),
             };

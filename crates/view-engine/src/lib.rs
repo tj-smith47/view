@@ -13,6 +13,7 @@ pub mod process;
 pub mod redraw_log;
 pub mod rpc;
 pub mod stall;
+mod swap_off;
 #[cfg(all(unix, feature = "bench-taps"))]
 mod tap;
 // test-only: a peer that parks inside a write, which no real engine can be

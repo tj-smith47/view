@@ -209,9 +209,6 @@ fn spawn_and_attach(
     crate::vlog::log_with("engine", || {
         format!("spawned pid={} stdin_relay={stdin_relay}", engine.pid())
     });
-    // ahead of the attach, which is when nvim opens the launch's files and
-    // looks for their swaps
-    crate::dvr::branch::restore_swap_copies(&engine);
     let Some((width, height, surfaces)) = start() else {
         crate::vlog::log("engine", "no terminal size ever came; killing the child");
         // `Engine`'s own `Drop` is the kill and the reap (see its impl):
@@ -381,6 +378,9 @@ pub fn attach_in_background(cfg: EngineConfig) -> AttachGuard {
     let spawned = Arc::clone(&pid);
     let attach = std::thread::spawn(move || {
         let mut started: Option<crate::wake::LoopSender> = None;
+        // ahead of the spawn, since nvim looks for the launch's swaps when
+        // it opens the files
+        crate::dvr::branch::restore_swap_copies();
         let result = spawn_and_attach(
             cfg,
             &spawned,

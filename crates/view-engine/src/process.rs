@@ -1293,16 +1293,8 @@ impl Engine {
                     });
                 }
             };
-        // nvim applies `-n` and every `--cmd` only once a UI has attached,
-        // and a child driven over RPC alone runs each command ahead of that
-        // with 'updatecount' at its default, writing swap files that
-        // concurrent children with the same swap directory collide on
-        if cfg.extra_args.iter().any(|arg| arg == "-n") {
-            let off = vec![Value::from("set updatecount=0")];
-            if let Err(err) = handle.request_timeout("nvim_command", off, cfg.handshake_timeout) {
-                return Err(SpawnAttempt::Fatal(err));
-            }
-        }
+        crate::swap_off::follow_no_swap(&handle, &cfg.extra_args, cfg.handshake_timeout)
+            .map_err(SpawnAttempt::Fatal)?;
         // handshake succeeded: disarm the guard and hand the child to the
         // long-lived Engine, which now owns reaping it via its own Drop
         // unreachable else: nothing clears guard.0 before this point

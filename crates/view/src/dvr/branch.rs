@@ -34,6 +34,7 @@ pub(crate) fn replace(
     channels: &LoopChannels,
     bound: Bound<'_>,
     plan: BranchPlan,
+    copies: &mut SwapCopies,
 ) -> Result<Restarted, AttachFailure> {
     for effect in view_core::update::prepare_branch(model) {
         // a close owes only local work, which answers no flow of its own
@@ -43,29 +44,26 @@ pub(crate) fn replace(
     // and the replacement would otherwise offer to recover each one. A copy
     // waits for the replacement, so the restart after a failed one offers
     // the unsaved text back
-    let kept = keep_swaps(engine);
+    let kept = keep_swaps(engine, copies);
     let _ = engine.wait_exit();
     let fresh = replace_engine(engine, respawn, model, channels, bound, &[]);
     if fresh.is_ok() {
         model.dvr.branched(plan.at_frame, plan.replay);
-        for (_, copy) in kept.copied {
+        for (_, copy) in &kept.copied {
             let _ = std::fs::remove_file(copy);
         }
     } else {
         model.dvr.branch_failed();
-        for (swap, copy) in kept.copied {
+        for (swap, copy) in &kept.copied {
             let _ = std::fs::rename(copy, swap);
         }
-        for swap in kept.failed {
-            let text = format!(
-                "view: DVR could not copy the swap file {}, so its unsaved text is lost",
-                swap.display()
-            );
+        for text in lost_text(&kept) {
             for effect in model.engine.record_native_notice(text, false) {
                 let _ = bound.2.run(effect);
             }
         }
     }
+    copies.clear();
     fresh
 }
 
@@ -74,17 +72,96 @@ pub(crate) fn replace(
 const CHANGED_SWAPS: &str = "join(map(filter(getbufinfo({'bufloaded': 1}), \
     'v:val.changed && swapname(v:val.bufnr) != \"\"'), 'fnamemodify(swapname(v:val.bufnr), \":p\")'), \"\\n\")";
 
-/// Every directory of `'directory'` a swap file can be found in by name,
-/// as an absolute path per line. An entry starting with `.` names each
-/// file's own directory, which holds no copy a sweep could list.
-const SWAP_DIRS: &str = r#"join(map(filter(split(&directory, ','), {_, d -> d[0] != '.'}), {_, d -> fnamemodify(expand(substitute(d, '/\+$', '', '')), ':p')}), "\n")"#;
-
-/// What a branch kept of the unsaved text: each swap with its copy, and
-/// each swap that could not be copied.
+/// What a branch kept of the unsaved text: each swap with its copy, each
+/// swap that could not be copied, and why the swaps could not be listed
+/// at all.
 #[derive(Default)]
 struct KeptSwaps {
     copied: Vec<(PathBuf, PathBuf)>,
     failed: Vec<PathBuf>,
+    unlisted: Option<String>,
+}
+
+/// A notice for each unsaved text a failed branch could not give back.
+fn lost_text(kept: &KeptSwaps) -> Vec<String> {
+    let unlisted = kept.unlisted.iter().map(|why| {
+        format!("view: DVR could not list the swap files: {why}, so unsaved text may be lost")
+    });
+    let failed = kept.failed.iter().map(|swap| {
+        format!(
+            "view: DVR could not copy the swap file {}, so its unsaved text is lost",
+            swap.display()
+        )
+    });
+    unlisted.chain(failed).collect()
+}
+
+/// The record of the swap copies this view has made and not yet put away,
+/// one file per running view under view's state directory, named by its
+/// pid. The file stays locked while the view runs, so a view starting
+/// beside it leaves its copies alone, and one left unlocked names the
+/// copies of a view that stopped mid-branch.
+pub(crate) struct SwapCopies {
+    dir: Option<PathBuf>,
+    file: Option<std::fs::File>,
+}
+
+impl SwapCopies {
+    /// The record kept in `dir`, which `None` turns off.
+    pub(crate) fn in_dir(dir: Option<PathBuf>) -> Self {
+        Self { dir, file: None }
+    }
+
+    /// The record kept under view's state directory.
+    pub(crate) fn for_this_view() -> Self {
+        Self::in_dir(copies_dir())
+    }
+
+    /// Writes down `copies` ahead of their being made, so a view that stops
+    /// before it has put them away leaves them named.
+    fn note(&mut self, copies: &[PathBuf]) {
+        use std::io::{Seek, Write};
+        let Some(file) = self.open() else {
+            return;
+        };
+        let mut text = String::new();
+        for copy in copies.iter().filter_map(|copy| copy.to_str()) {
+            text.push_str(copy);
+            text.push('\n');
+        }
+        let _ = file.set_len(0);
+        let _ = file.rewind();
+        let _ = file.write_all(text.as_bytes());
+    }
+
+    /// Forgets every copy, once each is removed or renamed back.
+    fn clear(&mut self) {
+        if let Some(file) = &self.file {
+            let _ = file.set_len(0);
+        }
+    }
+
+    fn open(&mut self) -> Option<&mut std::fs::File> {
+        if self.file.is_none() {
+            let dir = self.dir.as_ref()?;
+            std::fs::create_dir_all(dir).ok()?;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(dir.join(std::process::id().to_string()))
+                .ok()?;
+            file.try_lock().ok()?;
+            self.file = Some(file);
+        }
+        self.file.as_mut()
+    }
+}
+
+/// Where [`SwapCopies`] keeps its records.
+fn copies_dir() -> Option<PathBuf> {
+    let state = view_native::paths::state_dir()?;
+    Some(view_native::paths::cache_dir(&state).join("swap-copies"))
 }
 
 /// The name of the copy a branch keeps of `swap`.
@@ -98,20 +175,39 @@ fn copy_of(swap: &std::path::Path) -> PathBuf {
 const COPY_SUFFIX: &str = ".view-branch";
 
 /// Writes the swap file of every buffer with unsaved changes and copies
-/// each beside itself. A remote engine's swaps are on its own host, out of
-/// reach, so none is kept.
-fn keep_swaps(engine: &Engine) -> KeptSwaps {
-    let mut kept = KeptSwaps::default();
-    if engine.is_remote() || engine.handle.command("silent! preserve").is_err() {
-        return kept;
+/// each beside itself, noting each copy in `copies` first. A remote
+/// engine's swaps are on its own host, out of reach, so none is kept.
+fn keep_swaps(engine: &Engine, copies: &mut SwapCopies) -> KeptSwaps {
+    if engine.is_remote() {
+        return KeptSwaps::default();
     }
-    let listed = engine.handle.eval_str(CHANGED_SWAPS).unwrap_or_default();
-    for swap in listed
+    let listed = engine
+        .handle
+        .command("silent! preserve")
+        .and_then(|()| engine.handle.eval_str(CHANGED_SWAPS));
+    keep_listed(listed.map_err(|err| err.to_string()), copies)
+}
+
+/// [`keep_swaps`] for the swaps `listed` names, one per line.
+fn keep_listed(listed: Result<String, String>, copies: &mut SwapCopies) -> KeptSwaps {
+    let listed = match listed {
+        Ok(listed) => listed,
+        Err(why) => {
+            return KeptSwaps {
+                unlisted: Some(why),
+                ..KeptSwaps::default()
+            };
+        }
+    };
+    let swaps: Vec<PathBuf> = listed
         .lines()
         .filter(|line| !line.is_empty())
         .map(PathBuf::from)
-    {
-        let copy = copy_of(&swap);
+        .collect();
+    let named: Vec<PathBuf> = swaps.iter().map(|swap| copy_of(swap)).collect();
+    copies.note(&named);
+    let mut kept = KeptSwaps::default();
+    for (swap, copy) in swaps.into_iter().zip(named) {
         match std::fs::copy(&swap, &copy) {
             Ok(_) => kept.copied.push((swap, copy)),
             Err(_) => kept.failed.push(swap),
@@ -120,40 +216,60 @@ fn keep_swaps(engine: &Engine) -> KeptSwaps {
     kept
 }
 
-/// Puts back every swap copy a branch left in `engine`'s swap directories
-/// when view stopped between the copy and its removal. A copy whose swap
-/// is gone is renamed back to it, so the engine offers the unsaved text
-/// again; one whose swap still stands is removed. Run before the engine
-/// opens any file, so it reads `'directory'` as it stands ahead of the
-/// config.
-pub(crate) fn restore_swap_copies(engine: &Engine) {
-    if engine.is_remote() {
-        return;
-    }
-    let dirs = engine.handle.eval_str(SWAP_DIRS).unwrap_or_default();
-    for dir in dirs.lines().filter(|line| !line.is_empty()) {
-        restore_in(std::path::Path::new(dir));
+/// Puts back every swap copy a view left named in its record when it
+/// stopped between the copy and its removal. A copy whose swap is gone is
+/// renamed back to it, so the engine offers the unsaved text again; one
+/// whose swap still stands is removed. Run before the engine opens any
+/// file.
+pub(crate) fn restore_swap_copies() {
+    if let Some(dir) = copies_dir() {
+        restore_in(&dir);
     }
 }
 
-/// [`restore_swap_copies`] for one directory.
+/// [`restore_swap_copies`] for the records in `dir`, passing over each
+/// one a running view holds locked.
 fn restore_in(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for copy in entries.flatten().map(|entry| entry.path()) {
-        let Some(swap) = copy
-            .to_str()
-            .and_then(|path| path.strip_suffix(COPY_SUFFIX))
-            .map(PathBuf::from)
+    for record in entries.flatten().map(|entry| entry.path()) {
+        let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&record)
         else {
             continue;
         };
-        if swap.exists() {
-            let _ = std::fs::remove_file(&copy);
-        } else {
-            let _ = std::fs::rename(&copy, &swap);
+        if file.try_lock().is_err() {
+            continue;
         }
+        let listed = std::io::read_to_string(&file).unwrap_or_default();
+        for copy in listed.lines().map(std::path::Path::new) {
+            put_back(copy);
+        }
+        // a handle still open keeps Windows from removing the file
+        drop(file);
+        let _ = std::fs::remove_file(&record);
+    }
+}
+
+/// Renames `copy` back to its swap, or removes it where the swap stands.
+fn put_back(copy: &std::path::Path) {
+    let Some(swap) = copy
+        .to_str()
+        .and_then(|path| path.strip_suffix(COPY_SUFFIX))
+        .map(PathBuf::from)
+    else {
+        return;
+    };
+    if !copy.exists() {
+        return;
+    }
+    if swap.exists() {
+        let _ = std::fs::remove_file(copy);
+    } else {
+        let _ = std::fs::rename(copy, &swap);
     }
 }
 
@@ -193,6 +309,7 @@ mod tests {
         theme: crate::bridge::ThemeBridge,
         model: Model,
         frames: u64,
+        copies: SwapCopies,
     }
 
     impl Rig {
@@ -223,6 +340,7 @@ mod tests {
                 theme: crate::bridge::ThemeBridge::new(None, None),
                 model,
                 frames: 0,
+                copies: SwapCopies::in_dir(None),
             }
         }
 
@@ -353,6 +471,7 @@ mod tests {
                 &self.channels,
                 bound,
                 plan,
+                &mut self.copies,
             )?;
             Ok(self.cut_over(fresh))
         }
@@ -774,26 +893,107 @@ mod tests {
     }
 
     #[test]
-    fn a_swap_copy_left_by_a_crash_is_put_back_at_engine_start() {
+    fn a_swap_copy_named_by_a_stopped_view_is_put_back_at_start() {
         let scratch = view_test_support::ScratchDir::new("dvr-branch-litter").unwrap();
         let swaps = scratch.path().join("swap");
+        let records = scratch.path().join("records");
         std::fs::create_dir_all(&swaps).unwrap();
+        std::fs::create_dir_all(&records).unwrap();
         let gone = swaps.join("%w%gone.txt.swp");
         let kept = swaps.join("%w%kept.txt.swp");
+        let held = swaps.join("%w%held.txt.swp");
         std::fs::write(copy_of(&gone), "copy of gone").unwrap();
         std::fs::write(&kept, "kept swap").unwrap();
         std::fs::write(copy_of(&kept), "stale copy").unwrap();
-        let engine = Engine::spawn(EngineConfig::isolated()).unwrap();
-        engine
-            .handle
-            .command(&format!("set directory=.,{}//", swaps.display()))
-            .unwrap();
+        std::fs::write(copy_of(&held), "in flight").unwrap();
+        let stopped = format!(
+            "{}\n{}\n",
+            copy_of(&gone).display(),
+            copy_of(&kept).display()
+        );
+        std::fs::write(records.join("1"), stopped).unwrap();
+        let mut running = SwapCopies::in_dir(Some(records.clone()));
+        running.note(&[copy_of(&held)]);
 
-        restore_swap_copies(&engine);
+        restore_in(&records);
         assert_eq!(std::fs::read_to_string(&gone).unwrap(), "copy of gone");
         assert_eq!(std::fs::read_to_string(&kept).unwrap(), "kept swap");
-        let left = crate::dvr::io::listed(&swaps);
-        assert_eq!(left.len(), 2, "no copy is left: {left:?}");
+        assert!(!copy_of(&kept).exists(), "the stale copy is removed");
+        assert_eq!(
+            std::fs::read_to_string(copy_of(&held)).unwrap(),
+            "in flight",
+            "a running view's copy is left to it"
+        );
+        let left = crate::dvr::io::listed(&records);
+        assert_eq!(left, [std::process::id().to_string()]);
+    }
+
+    #[test]
+    fn a_branch_names_its_copies_wherever_the_config_puts_the_swaps() {
+        let scratch = view_test_support::ScratchDir::new("dvr-branch-record").unwrap();
+        let file = scratch.path().join("doc.txt");
+        std::fs::write(&file, "on disk\n").unwrap();
+        let swaps = scratch.path().join("swap");
+        let records = scratch.path().join("records");
+        std::fs::create_dir_all(&swaps).unwrap();
+        let mut rig = Rig::new();
+        let (mut engine, pump, _route, _ai_route, executor) = rig.launch(
+            EngineConfig::default()
+                .with_arg("--clean")
+                .with_arg("--cmd")
+                .with_arg(format!("lua vim.o.directory = [[{}//]]", swaps.display()))
+                .with_env("XDG_STATE_HOME", scratch.path().join("state"))
+                .with_arg(&file),
+        );
+        let mut edit = keys(&["c", "c"]);
+        edit.extend(chars("unsaved"));
+        edit.push("<Esc>".to_owned());
+        typed(&mut rig, &executor, &edit);
+        rig.settle(&engine, &pump, &executor, "the session edits", |_, e| {
+            line(e, 1) == "unsaved"
+        });
+        let swap = eval(&engine, "fnamemodify(swapname('%'), ':t')");
+
+        let mut copies = SwapCopies::in_dir(Some(records.clone()));
+        let kept = keep_swaps(&engine, &mut copies);
+        assert_eq!(kept.copied.len(), 1);
+        let _ = engine.handle.command("qa!");
+        let _ = engine.wait_exit();
+        assert_eq!(
+            crate::dvr::io::listed(&swaps),
+            [format!("{swap}{COPY_SUFFIX}")]
+        );
+        // a view that stops here leaves its record unlocked
+        drop(copies);
+        // a child another test forks in the meantime holds the lock until
+        // it runs its program
+        let probe = std::fs::File::open(records.join(std::process::id().to_string())).unwrap();
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(5));
+        while probe.try_lock().is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the record stays locked"
+            );
+            std::thread::yield_now();
+        }
+        drop(probe);
+
+        restore_in(&records);
+        assert_eq!(crate::dvr::io::listed(&swaps), [swap]);
+        assert!(crate::dvr::io::listed(&records).is_empty());
+    }
+
+    #[test]
+    fn a_failed_branch_names_a_swap_listing_it_could_not_take() {
+        let mut copies = SwapCopies::in_dir(None);
+        let kept = keep_listed(Err("request timed out".to_owned()), &mut copies);
+        let told = lost_text(&kept);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            told[0].contains("could not list the swap files: request timed out"),
+            "{told:?}"
+        );
     }
 
     #[test]

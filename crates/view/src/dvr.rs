@@ -515,11 +515,14 @@ fn expand_path(
         match c {
             '\\' if cfg!(unix) => out.extend(chars.next()),
             '$' if chars.peek() == Some(&'{') => {
-                if !chars.clone().any(|c| c == '}') {
+                let _ = chars.next();
+                let mut name = String::new();
+                while let Some(c) = chars.next_if(name_char) {
+                    name.push(c);
+                }
+                if chars.next() != Some('}') {
                     return Err("${ has no closing }".to_owned());
                 }
-                let _ = chars.next();
-                let name: String = chars.by_ref().take_while(|c| *c != '}').collect();
                 if name.is_empty() {
                     return Err("${} names no variable".to_owned());
                 }
@@ -1631,6 +1634,7 @@ mod tests {
             ("~x/a.vdvr", "~user is not expanded; write the directory"),
             ("${}/a.vdvr", "${} names no variable"),
             ("${D/a.vdvr", "${ has no closing }"),
+            ("${D/a}.vdvr", "${ has no closing }"),
         ] {
             assert_eq!(expand(typed), Err(reason.to_owned()), "{typed}");
         }
