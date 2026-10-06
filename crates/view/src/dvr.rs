@@ -162,7 +162,7 @@ impl DvrLoop {
                 DvrRequest::DiskCheck => self.unsent.push_back(IoJob::DiskCheck),
                 DvrRequest::Export(path) => {
                     let reply = match path.map(|typed| local_path(&typed, &model.cwd)) {
-                        Some(Err(name)) => Some(unset("export", &name)),
+                        Some(Err(reason)) => Some(refused("export", reason)),
                         Some(Ok(path)) => self.export(model, Some(path)).err(),
                         None => self.export(model, None).err(),
                     };
@@ -176,8 +176,8 @@ impl DvrLoop {
                         path,
                         max_bytes: model.dvr.max_bytes(),
                     }),
-                    Err(name) => {
-                        let reply = Msg::DvrIo(unset("play", &name));
+                    Err(reason) => {
+                        let reply = Msg::DvrIo(refused("play", reason));
                         effects.extend(view_core::update::update(model, reply));
                     }
                 },
@@ -486,7 +486,8 @@ pub(crate) fn paint_pass<T>(
 /// `$NAME` and `${NAME}` are environment variables, a backslash keeps the
 /// character after it on unix, where it is no separator, and a relative
 /// path starts at `cwd`. The engine may run on another host, so nothing of
-/// its own is read. `Err` names a variable that is not set.
+/// its own is read. `Err` is the reason the path is refused: a variable
+/// that is not set, `~user`, `${}` or a `${` with no closing `}`.
 fn local_path(typed: &str, cwd: &std::path::Path) -> Result<PathBuf, String> {
     expand_path(typed, cwd, std::env::home_dir().as_deref(), |name| {
         std::env::var(name).ok()
@@ -499,42 +500,47 @@ fn expand_path(
     home: Option<&std::path::Path>,
     var: impl Fn(&str) -> Option<String>,
 ) -> Result<PathBuf, String> {
+    let (base, rest) = match (typed.strip_prefix('~'), home) {
+        (Some(rest), _) if !rest.is_empty() && !rest.starts_with(['/', '\\']) => {
+            return Err("~user is not expanded; write the directory".to_owned());
+        }
+        (Some(rest), Some(home)) => (home, rest.trim_start_matches(['/', '\\'])),
+        _ => (std::path::Path::new(""), typed),
+    };
+    let lookup = |name: &str| var(name).ok_or_else(|| format!("${name} is not set"));
     let mut out = String::new();
-    let mut chars = typed.chars().peekable();
+    let mut chars = rest.chars().peekable();
     let name_char = |c: &char| c.is_ascii_alphanumeric() || *c == '_';
     while let Some(c) = chars.next() {
         match c {
             '\\' if cfg!(unix) => out.extend(chars.next()),
-            '$' if chars.peek() == Some(&'{') && chars.clone().any(|c| c == '}') => {
+            '$' if chars.peek() == Some(&'{') => {
+                if !chars.clone().any(|c| c == '}') {
+                    return Err("${ has no closing }".to_owned());
+                }
                 let _ = chars.next();
                 let name: String = chars.by_ref().take_while(|c| *c != '}').collect();
-                out.push_str(&var(&name).ok_or(name)?);
+                if name.is_empty() {
+                    return Err("${} names no variable".to_owned());
+                }
+                out.push_str(&lookup(&name)?);
             }
             '$' if chars.peek().is_some_and(name_char) => {
                 let mut name = String::new();
                 while let Some(c) = chars.next_if(name_char) {
                     name.push(c);
                 }
-                out.push_str(&var(&name).ok_or(name)?);
+                out.push_str(&lookup(&name)?);
             }
             c => out.push(c),
         }
     }
-    let path = match (out.strip_prefix('~'), home) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
-            home.join(rest.trim_start_matches(['/', '\\']))
-        }
-        _ => PathBuf::from(out),
-    };
-    Ok(cwd.join(path))
+    Ok(cwd.join(base.join(out)))
 }
 
-/// The reply a path naming the unset variable `name` gets from `verb`.
-fn unset(verb: &'static str, name: &str) -> DvrIoReply {
-    DvrIoReply::Failed {
-        verb,
-        reason: format!("${name} is not set"),
-    }
+/// The reply `verb` gets for a path [`local_path`] refused for `reason`.
+fn refused(verb: &'static str, reason: String) -> DvrIoReply {
+    DvrIoReply::Failed { verb, reason }
 }
 
 /// What the bar adds while something on the live screen waits for an answer.
@@ -1601,7 +1607,6 @@ mod tests {
             ("sub/a.vdvr", "/start/sub/a.vdvr"),
             ("~/a.vdvr", "/home/me/a.vdvr"),
             ("~", "/home/me"),
-            ("~x/a.vdvr", "/start/~x/a.vdvr"),
             ("$D/a.vdvr", "/d/a.vdvr"),
             ("${D}a.vdvr", "/da.vdvr"),
             ("/abs/a.vdvr", "/abs/a.vdvr"),
@@ -1610,9 +1615,25 @@ mod tests {
             assert_eq!(expand(typed), Ok(PathBuf::from(want)), "{typed}");
         }
         #[cfg(unix)]
-        assert_eq!(expand(r"a\ b\$D"), Ok(PathBuf::from("/start/a b$D")));
-        assert_eq!(expand("$NOPE/a.vdvr"), Err("NOPE".to_owned()));
-        assert_eq!(expand("${NOPE}"), Err("NOPE".to_owned()));
+        {
+            assert_eq!(expand(r"a\ b\$D"), Ok(PathBuf::from("/start/a b$D")));
+            assert_eq!(expand(r"\~/a.vdvr"), Ok(PathBuf::from("/start/~/a.vdvr")));
+        }
+        let tilde = |name: &str| (name == "T").then(|| "~/t".to_owned());
+        assert_eq!(
+            expand_path("$T/a.vdvr", cwd, Some(home), tilde),
+            Ok(PathBuf::from("/start/~/t/a.vdvr")),
+            "a variable's own `~` is a name"
+        );
+        for (typed, reason) in [
+            ("$NOPE/a.vdvr", "$NOPE is not set"),
+            ("${NOPE}", "$NOPE is not set"),
+            ("~x/a.vdvr", "~user is not expanded; write the directory"),
+            ("${}/a.vdvr", "${} names no variable"),
+            ("${D/a.vdvr", "${ has no closing }"),
+        ] {
+            assert_eq!(expand(typed), Err(reason.to_owned()), "{typed}");
+        }
     }
 
     #[test]
@@ -1639,5 +1660,10 @@ mod tests {
             verb(&mut model, &mut dvr, verb_line);
         }
         assert_eq!(told(&model, "$VIEW_DVR_TEST_UNSET is not set"), 2);
+        verb(&mut model, &mut dvr, "export ~bob/a.vdvr");
+        assert_eq!(
+            told(&model, "~user is not expanded; write the directory"),
+            1
+        );
     }
 }

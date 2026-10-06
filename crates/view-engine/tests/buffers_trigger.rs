@@ -150,4 +150,27 @@ fn the_buffers_trigger_reports_the_listed_set_once_per_tick() {
             "`{chunk}` armed no report, so the row stays stale"
         );
     }
+
+    // the swap file an unsaved buffer keeps its text in, and its absence
+    // once the buffer is set to keep none
+    lua(
+        "vim.o.updatecount = 200 vim.cmd('edit view-buffers-trigger-swap.rs') \
+         vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'unsaved' })"
+            .to_string(),
+    );
+    let swapped = drain(&rx);
+    let entry = |report: &[BufferEntry]| {
+        report
+            .iter()
+            .find(|entry| entry.name == "view-buffers-trigger-swap.rs")
+            .cloned()
+            .expect("the edited buffer is on the list")
+    };
+    let kept = entry(swapped.last().expect("the edit reported nothing"));
+    assert!(kept.modified && kept.swap.ends_with(".swp"), "{kept:?}");
+    lua("vim.cmd('setlocal noswapfile')".to_string());
+    let dropped = drain(&rx);
+    let lost = entry(dropped.last().expect("`noswapfile` armed no report"));
+    assert_eq!(lost.swap, "", "{lost:?}");
+    lua("vim.cmd('bwipeout!')".to_string());
 }

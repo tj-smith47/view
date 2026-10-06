@@ -275,7 +275,8 @@ fn decode_buffer_entries(list: &Value) -> Option<Vec<BufferEntry>> {
         list.as_array()?
             .iter()
             .filter_map(|entry| {
-                let [buf, name, modified, current, path] = entry.as_array()?.as_slice() else {
+                let [buf, name, modified, current, path, swap] = entry.as_array()?.as_slice()
+                else {
                     return None;
                 };
                 Some(
@@ -285,7 +286,8 @@ fn decode_buffer_entries(list: &Value) -> Option<Vec<BufferEntry>> {
                         modified.as_bool().unwrap_or(false),
                         current.as_bool().unwrap_or(false),
                     )
-                    .with_path(path.as_str().unwrap_or_default().to_owned()),
+                    .with_path(path.as_str().unwrap_or_default().to_owned())
+                    .with_swap(swap.as_str().unwrap_or_default().to_owned()),
                 )
             })
             .collect(),

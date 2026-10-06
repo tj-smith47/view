@@ -28,11 +28,13 @@
 /// data is interpolated into the Lua source.
 ///
 /// The payload is `(list)`, one entry per listed buffer as
-/// `(buf, name, modified, current, path)`, decoded by `handle::decode`'s
+/// `(buf, name, modified, current, path, swap)`, decoded by `handle::decode`'s
 /// `"buffers"` arm. `name` is the buffer's tail, the same `:t` modifier the
 /// `window` trigger takes, because the row names a file. A whole path
 /// would not fit. `path` is the whole one, for a restart to reopen, and
 /// empty for a buffer with a `buftype`, which holds no file to open.
+/// `swap` is the buffer's swap file, empty where it has none, so a branch
+/// confirm can name the unsaved text no swap keeps.
 ///
 /// `BufModifiedSet` is in the trigger list beside the three that change the
 /// set itself: the row draws an unsaved marker, and without it the marker
@@ -40,7 +42,8 @@
 /// `OptionSet buflisted` are there because `:file newname` and
 /// `:setlocal nobuflisted` change what the row says without adding or
 /// removing a buffer, and the row would stay stale until the next
-/// `BufEnter`.
+/// `BufEnter`. `OptionSet swapfile` is there for the same reason: it adds
+/// or removes the swap file without any other trigger firing.
 ///
 /// The report runs under a `pcall` for [`REGISTER_WINDOW_STATUS_CHUNK`]'s
 /// reason: it is scheduled, so it can land after a channel teardown.
@@ -63,7 +66,7 @@ local function report()
       local name = vim.api.nvim_buf_get_name(buf)
       listed[#listed + 1] = { buf, vim.fn.fnamemodify(name, ':t'),
         vim.bo[buf].modified, buf == current,
-        vim.bo[buf].buftype == '' and name or '' }
+        vim.bo[buf].buftype == '' and name or '', vim.fn.swapname(buf) }
     end
   end
   vim.rpcnotify(channel, 'view_bridge', 'buffers', listed)
@@ -86,7 +89,7 @@ vim.api.nvim_create_autocmd({ 'BufAdd', 'BufDelete', 'BufEnter',
 })
 vim.api.nvim_create_autocmd('OptionSet', {
   group = group,
-  pattern = 'buflisted',
+  pattern = { 'buflisted', 'swapfile' },
   callback = arm,
 })
 vim.api.nvim_create_autocmd('VimEnter', {

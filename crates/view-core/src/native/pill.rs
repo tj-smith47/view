@@ -567,6 +567,7 @@ mod tests {
             modified: false,
             current,
             path: String::new(),
+            swap: String::new(),
         }
     }
 

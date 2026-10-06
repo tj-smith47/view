@@ -1,7 +1,7 @@
 //! The session DVR's `:View dvr` verbs and the keys the scrub answers while
 //! the screen shows a recorded frame.
 
-use crate::model::{unsaved_files, Model, OverlayKind};
+use crate::model::{unsaved_files, unsaved_without_swap, Model, OverlayKind};
 use crate::msg::{Effect, Msg};
 use crate::native::dvr::{BranchRefusal, DvrIoReply, ExportRefusal, ScrubStep};
 use crate::native::prompt::PromptState;
@@ -215,6 +215,12 @@ pub(super) fn on_io(model: &mut Model, reply: &DvrIoReply) -> Vec<Effect> {
             // branch that fails has nothing to offer back
             if model.remote.is_some() && !unsaved.is_empty() {
                 state.add_sentence("If the branch fails, the unsaved text is lost.");
+            } else {
+                for path in unsaved_without_swap(&model.buffers) {
+                    state.add_sentence(&format!(
+                        "{path} has no swap file: its unsaved text is lost if the branch fails."
+                    ));
+                }
             }
             for sentence in agent_waits(model) {
                 state.add_sentence(sentence);
@@ -658,6 +664,27 @@ mod tests {
         let lost = "If the branch fails, the unsaved text is lost.";
         assert!(confirm(Some("host")).contains(lost));
         assert!(!confirm(None).contains(lost), "a local swap is kept");
+    }
+
+    #[test]
+    fn the_branch_confirm_names_each_unsaved_buffer_no_swap_keeps() {
+        let mut m = recorded();
+        let entry = |buf: u64, path: &str, swap: &str| {
+            crate::model::BufferEntry::new(buf, String::new(), true, false)
+                .with_path(path.into())
+                .with_swap(swap.into())
+        };
+        let buffers = vec![
+            entry(1, "/w/kept.txt", "/s/%w%kept.txt.swp"),
+            entry(2, "/w/scratch.txt", ""),
+        ];
+        let _ = update(&mut m, Msg::BufferList { buffers });
+        branch_back(&mut m, 2);
+        checked(&mut m, &[], false);
+        let text = prompt_text(&m).unwrap();
+        let lost = "has no swap file: its unsaved text is lost if the branch fails.";
+        assert!(text.contains(&format!("/w/scratch.txt {lost}")), "{text}");
+        assert_eq!(text.matches(lost).count(), 1, "{text}");
     }
 
     #[test]

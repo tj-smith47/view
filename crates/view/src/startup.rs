@@ -209,6 +209,9 @@ fn spawn_and_attach(
     crate::vlog::log_with("engine", || {
         format!("spawned pid={} stdin_relay={stdin_relay}", engine.pid())
     });
+    // ahead of the attach, which is when nvim opens the launch's files and
+    // looks for their swaps
+    crate::dvr::branch::restore_swap_copies(&engine);
     let Some((width, height, surfaces)) = start() else {
         crate::vlog::log("engine", "no terminal size ever came; killing the child");
         // `Engine`'s own `Drop` is the kill and the reap (see its impl):

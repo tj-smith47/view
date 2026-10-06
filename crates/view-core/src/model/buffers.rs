@@ -19,6 +19,10 @@ pub struct BufferEntry {
     pub current: bool,
     /// The file's full path, empty for a buffer that holds no file.
     pub path: String,
+    /// The buffer's swap file, empty when it has none (`noswapfile`, or
+    /// `'updatecount'` 0), which leaves its unsaved text nowhere but in
+    /// the engine.
+    pub swap: String,
 }
 
 impl BufferEntry {
@@ -35,6 +39,7 @@ impl BufferEntry {
             modified,
             current,
             path: String::new(),
+            swap: String::new(),
         }
     }
 
@@ -44,6 +49,24 @@ impl BufferEntry {
         self.path = path;
         self
     }
+
+    /// This entry with the buffer's swap file.
+    #[must_use]
+    pub fn with_swap(mut self, swap: String) -> Self {
+        self.swap = swap;
+        self
+    }
+}
+
+/// The full path of every listed buffer that holds a file with unsaved
+/// changes and no swap file to keep them in, in list order.
+#[must_use]
+pub fn unsaved_without_swap(buffers: &[BufferEntry]) -> Vec<String> {
+    buffers
+        .iter()
+        .filter(|entry| entry.modified && !entry.path.is_empty() && entry.swap.is_empty())
+        .map(|entry| entry.path.clone())
+        .collect()
 }
 
 /// The files a replacement engine opens to bring the session back: every

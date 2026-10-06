@@ -946,17 +946,19 @@ branches. `n` and `<Esc>` return to the live screen.
 
 `e` writes `view-dvr-<seconds>.vdvr` in the directory view was started in.
 `:View dvr export PATH` writes to PATH on the machine view runs on, and
-under `--remote` that is your own machine. `~` is your home directory,
-`$NAME` and `${NAME}` are environment variables, and a relative path starts
-from the directory view was started in. On Linux and macOS a backslash
-keeps the character after it, so `a\ b.vdvr` names a file with a space.
-`%`, `#` and `<` stay as typed. A path naming an environment variable that
-is not set is refused, and nothing is written. On Linux and macOS the clip
-can be read by you alone. A clip holds the screen as it was shown and
-nothing you typed. A notice names the file once it is written. An
-existing file is left as it is, and the notice says so. A clip still being
-written when view quits gets up to two seconds to finish. One that does
-not is removed, and view says so as it exits.
+under `--remote` that is your own machine. `~` at the start of the path is
+your home directory, `$NAME` and `${NAME}` are environment variables, and a
+relative path starts from the directory view was started in. On Linux and
+macOS a backslash keeps the character after it, so `a\ b.vdvr` names a file
+with a space and `\~` names a directory called `~`. `%`, `#` and `<` stay as
+typed. A path is refused, and nothing is written, when it names an
+environment variable that is not set, starts with `~user`, or holds `${}` or
+a `${` with no closing `}`. On Linux and macOS the clip can be read by you
+alone. A clip holds the screen as it was shown and nothing you typed. A
+notice names the file once it is written. An existing file is left as it
+is, and the notice says so. A clip still being written when view quits gets
+up to two seconds to finish. One that does not is removed, and view says so
+as it exits.
 
 `:View dvr play PATH` opens a clip in the scrub, with PATH read as the
 export path is. The bar starts with `CLIP` and the clip's file name. The

@@ -2222,7 +2222,7 @@ mod resize;
 mod rows;
 mod window_status;
 
-pub use buffers::{reopen_order, unsaved_files, BufferEntry};
+pub use buffers::{reopen_order, unsaved_files, unsaved_without_swap, BufferEntry};
 pub use caps::{TermCaps, Tier};
 pub use look::{Detected, Joined, Look, Panes, MIN_FRAMED_SLOT};
 use messages::is_standing_native_notice;

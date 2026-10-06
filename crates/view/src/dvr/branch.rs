@@ -22,8 +22,11 @@ use crate::startup::AttachFailure;
 /// The bound [`crate::recovery::restart_engine`] states: the stop waits up
 /// to the engine's `shutdown_timeout` and the spawn up to its
 /// `handshake_timeout`, on a frame the person asked to stall by confirming.
-/// The replay folds once per recorded input, once the replacement's
-/// takeover has claimed view's keys ([`due_replay`]).
+/// Ahead of the stop, the swap writes (`preserve`) and the list of changed
+/// buffers' swaps are two requests bounded at 5 s each. An engine too busy
+/// to answer them stalls the branch up to their joint 10 s bound. The
+/// replay folds once per recorded input, once the replacement's takeover
+/// has claimed view's keys ([`due_replay`]).
 pub(crate) fn replace(
     engine: &mut Engine,
     respawn: &dyn Fn(&[String]) -> EngineConfig,
@@ -45,13 +48,22 @@ pub(crate) fn replace(
     let fresh = replace_engine(engine, respawn, model, channels, bound, &[]);
     if fresh.is_ok() {
         model.dvr.branched(plan.at_frame, plan.replay);
-        for (_, copy) in kept {
+        for (_, copy) in kept.copied {
             let _ = std::fs::remove_file(copy);
         }
     } else {
         model.dvr.branch_failed();
-        for (swap, copy) in kept {
+        for (swap, copy) in kept.copied {
             let _ = std::fs::rename(copy, swap);
+        }
+        for swap in kept.failed {
+            let text = format!(
+                "view: DVR could not copy the swap file {}, so its unsaved text is lost",
+                swap.display()
+            );
+            for effect in model.engine.record_native_notice(text, false) {
+                let _ = bound.2.run(effect);
+            }
         }
     }
     fresh
@@ -62,25 +74,87 @@ pub(crate) fn replace(
 const CHANGED_SWAPS: &str = "join(map(filter(getbufinfo({'bufloaded': 1}), \
     'v:val.changed && swapname(v:val.bufnr) != \"\"'), 'fnamemodify(swapname(v:val.bufnr), \":p\")'), \"\\n\")";
 
+/// Every directory of `'directory'` a swap file can be found in by name,
+/// as an absolute path per line. An entry starting with `.` names each
+/// file's own directory, which holds no copy a sweep could list.
+const SWAP_DIRS: &str = r#"join(map(filter(split(&directory, ','), {_, d -> d[0] != '.'}), {_, d -> fnamemodify(expand(substitute(d, '/\+$', '', '')), ':p')}), "\n")"#;
+
+/// What a branch kept of the unsaved text: each swap with its copy, and
+/// each swap that could not be copied.
+#[derive(Default)]
+struct KeptSwaps {
+    copied: Vec<(PathBuf, PathBuf)>,
+    failed: Vec<PathBuf>,
+}
+
+/// The name of the copy a branch keeps of `swap`.
+fn copy_of(swap: &std::path::Path) -> PathBuf {
+    let mut copy = swap.as_os_str().to_owned();
+    copy.push(COPY_SUFFIX);
+    PathBuf::from(copy)
+}
+
+/// The suffix a swap copy carries, which nvim lists as no swap of its own.
+const COPY_SUFFIX: &str = ".view-branch";
+
 /// Writes the swap file of every buffer with unsaved changes and copies
-/// each beside itself. Returns each swap with its copy. A remote engine's
-/// swaps are on its own host, out of reach, so none is kept.
-fn keep_swaps(engine: &Engine) -> Vec<(PathBuf, PathBuf)> {
+/// each beside itself. A remote engine's swaps are on its own host, out of
+/// reach, so none is kept.
+fn keep_swaps(engine: &Engine) -> KeptSwaps {
+    let mut kept = KeptSwaps::default();
     if engine.is_remote() || engine.handle.command("silent! preserve").is_err() {
-        return Vec::new();
+        return kept;
     }
     let listed = engine.handle.eval_str(CHANGED_SWAPS).unwrap_or_default();
-    listed
+    for swap in listed
         .lines()
         .filter(|line| !line.is_empty())
-        .map(|line| {
-            let swap = PathBuf::from(line);
-            let mut copy = swap.clone().into_os_string();
-            copy.push(".view-branch");
-            (swap, PathBuf::from(copy))
-        })
-        .filter(|(swap, copy)| std::fs::copy(swap, copy).is_ok())
-        .collect()
+        .map(PathBuf::from)
+    {
+        let copy = copy_of(&swap);
+        match std::fs::copy(&swap, &copy) {
+            Ok(_) => kept.copied.push((swap, copy)),
+            Err(_) => kept.failed.push(swap),
+        }
+    }
+    kept
+}
+
+/// Puts back every swap copy a branch left in `engine`'s swap directories
+/// when view stopped between the copy and its removal. A copy whose swap
+/// is gone is renamed back to it, so the engine offers the unsaved text
+/// again; one whose swap still stands is removed. Run before the engine
+/// opens any file, so it reads `'directory'` as it stands ahead of the
+/// config.
+pub(crate) fn restore_swap_copies(engine: &Engine) {
+    if engine.is_remote() {
+        return;
+    }
+    let dirs = engine.handle.eval_str(SWAP_DIRS).unwrap_or_default();
+    for dir in dirs.lines().filter(|line| !line.is_empty()) {
+        restore_in(std::path::Path::new(dir));
+    }
+}
+
+/// [`restore_swap_copies`] for one directory.
+fn restore_in(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for copy in entries.flatten().map(|entry| entry.path()) {
+        let Some(swap) = copy
+            .to_str()
+            .and_then(|path| path.strip_suffix(COPY_SUFFIX))
+            .map(PathBuf::from)
+        else {
+            continue;
+        };
+        if swap.exists() {
+            let _ = std::fs::remove_file(&copy);
+        } else {
+            let _ = std::fs::rename(&copy, &swap);
+        }
+    }
 }
 
 /// The messages a branch's replay folds now: none while the replacement's
@@ -663,6 +737,67 @@ mod tests {
             .command(&format!("silent recover {}", file.display()))
             .unwrap();
         assert_eq!(line(&back.engine, 1), "unsaved", "the text comes back");
+    }
+
+    #[test]
+    fn a_failed_branch_names_a_swap_it_could_not_copy() {
+        let scratch = view_test_support::ScratchDir::new("dvr-branch-nocopy").unwrap();
+        let file = scratch.path().join("doc.txt");
+        std::fs::write(&file, "on disk\n").unwrap();
+        let swaps = scratch.path().join("swap");
+        std::fs::create_dir_all(&swaps).unwrap();
+        let bare = || {
+            EngineConfig::default()
+                .with_arg("--clean")
+                .with_arg("--cmd")
+                .with_arg(format!("lua vim.o.directory = [[{}//]]", swaps.display()))
+                .with_env("XDG_STATE_HOME", scratch.path().join("state"))
+        };
+        let respawn = |_: &[String]| bare().with_nvim_bin("/nonexistent/nvim");
+        let mut rig = Rig::new();
+        let (mut engine, pump, route, ai_route, executor) = rig.launch(bare().with_arg(&file));
+        let at = rig.frames;
+        let mut edit = keys(&["c", "c"]);
+        edit.extend(chars("unsaved"));
+        edit.push("<Esc>".to_owned());
+        typed(&mut rig, &executor, &edit);
+        rig.settle(&engine, &pump, &executor, "the session edits", |_, e| {
+            line(e, 1) == "unsaved"
+        });
+        let swap = eval(&engine, "fnamemodify(swapname('%'), ':p')");
+        // a directory standing where the copy goes refuses it, whoever runs
+        std::fs::create_dir(copy_of(std::path::Path::new(&swap))).unwrap();
+
+        let failed = rig.start_branch(&mut engine, &respawn, (&route, &ai_route, &executor), at);
+        assert!(matches!(failed, Err(AttachFailure::Spawn(_))));
+        let told = format!("{:?}", rig.model.engine.messages.entries);
+        assert!(
+            told.contains(&format!("could not copy the swap file {swap}")),
+            "{told}"
+        );
+    }
+
+    #[test]
+    fn a_swap_copy_left_by_a_crash_is_put_back_at_engine_start() {
+        let scratch = view_test_support::ScratchDir::new("dvr-branch-litter").unwrap();
+        let swaps = scratch.path().join("swap");
+        std::fs::create_dir_all(&swaps).unwrap();
+        let gone = swaps.join("%w%gone.txt.swp");
+        let kept = swaps.join("%w%kept.txt.swp");
+        std::fs::write(copy_of(&gone), "copy of gone").unwrap();
+        std::fs::write(&kept, "kept swap").unwrap();
+        std::fs::write(copy_of(&kept), "stale copy").unwrap();
+        let engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+        engine
+            .handle
+            .command(&format!("set directory=.,{}//", swaps.display()))
+            .unwrap();
+
+        restore_swap_copies(&engine);
+        assert_eq!(std::fs::read_to_string(&gone).unwrap(), "copy of gone");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "kept swap");
+        let left = crate::dvr::io::listed(&swaps);
+        assert_eq!(left.len(), 2, "no copy is left: {left:?}");
     }
 
     #[test]
