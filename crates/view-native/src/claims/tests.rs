@@ -390,7 +390,9 @@ fn resolved(toml: &str) -> ResolvedConfig {
 
 #[test]
 fn every_row_a_run_puts_back_prints_its_default_with_the_notice_under_it() {
-    const ON: &str = "[dvr]\nenabled = true\n";
+    // `auto` derives the editor profile on macOS and Windows, which
+    // registers no desktop chord to collide with.
+    const ON: &str = "dvr.enabled = true\nkeys.profile = \"desktop\"\n";
     let defaults = resolved(ON);
     let printed = |config: &ResolvedConfig, row: (&str, &str)| {
         config
@@ -412,7 +414,7 @@ fn every_row_a_run_puts_back_prints_its_default_with_the_notice_under_it() {
             .filter_map(|h| h.keys.first())
             .filter(|k| !moved.canonical.contains(&lhs_keys(k, None)))
             .find_map(|key| {
-                let toml = format!("{ON}[{}]\n{} = {key:?}\n", row.0, row.1);
+                let toml = format!("{ON}{}.{} = {key:?}\n", row.0, row.1);
                 let config = resolved(&toml);
                 let put_back = config.held_keys(DesktopModifier::Alt, true, None).put_back;
                 put_back

@@ -934,7 +934,15 @@ mod tests {
 
         let failed = rig.start_branch(&mut engine, &respawn, (&route, &ai_route, &executor), at);
         assert!(matches!(failed, Err(AttachFailure::Spawn(_))));
-        let told = format!("{:?}", rig.model.engine.messages.entries);
+        // the entries' own text: Debug doubles a Windows path's backslashes
+        let told: String = rig
+            .model
+            .engine
+            .messages
+            .entries
+            .iter()
+            .flat_map(|entry| entry.content().iter().map(|(_, text)| text.as_str()))
+            .collect();
         assert!(
             told.contains(&format!("could not copy the swap file {swap}")),
             "{told}"
