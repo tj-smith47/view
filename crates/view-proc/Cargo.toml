@@ -19,7 +19,7 @@ rustix = { version = "1", default-features = false, features = [
 ] }
 
 # The job object the children are tied by. Scoped to Windows for the reason
-# rustix is scoped to Linux: no other target calls any of it.
+# rustix is scoped to unix: no other target calls any of it.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     # CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject

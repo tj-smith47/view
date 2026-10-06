@@ -21,3 +21,18 @@ key_to_rpc_p99_us = 66.427
 
 [output_path.minimal]
 p99_ms = 0.12898
+
+[scroll.heavy]
+ratio_p50 = 1.8819220412189726
+ratio_p99 = 1.7366130590722515
+staleness_p99_ms = 1.643148
+
+[scroll.minimal]
+ratio_p50 = 1.7523287419942604
+ratio_p99 = 1.6333095754355678
+staleness_p99_ms = 1.411627
+
+[scroll.user]
+ratio_p50 = 1.7777795784748278
+ratio_p99 = 1.91590355806942
+staleness_p99_ms = 2.0996550000000003
