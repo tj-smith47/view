@@ -225,6 +225,10 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             effects.extend(update(model, held));
         }
     }
+    if !model.submit_hold.holds_sequence() {
+        let flush = model.dvr.release_sequenced();
+        effects.extend(flush.map(|generation| Effect::Rpc(RpcCall::FlushReplay { generation })));
+    }
     effects
 }
 
@@ -684,7 +688,13 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // a replayed key or line may invoke either one again, and its
             // source cannot be told from a person's
             if model.dvr.draining() && (feature == "review" || feature == "dvr") {
-                return Vec::new();
+                if !model.dvr.first_drop() {
+                    return Vec::new();
+                }
+                model.dirty = true;
+                return model
+                    .engine
+                    .record_native_notice(dvr::DRAIN_NOTICE.to_owned(), false);
             }
             // `ai_enabled` gates ahead of `ai_trusted`: a feature that is
             // off has nothing to trust it for, so prompting first would ask

@@ -261,6 +261,11 @@ pub struct Dvr {
     /// reached the engine yet. Input logged meanwhile goes ahead of them,
     /// since the engine gets it first.
     unfolded: usize,
+    /// How many replayed keys a surface holds as the start of a mapped
+    /// sequence, which reach the engine only once the sequence resolves.
+    sequenced: usize,
+    /// Whether this drain has said that it drops review and DVR verbs.
+    told_drop: bool,
     /// The clip the scrub shows in place of the recording.
     clip: Option<String>,
     /// How many of the clip's oldest frames did not fit `[dvr] max_mb`.
@@ -558,6 +563,7 @@ impl Dvr {
         self.unfolded = replay.len();
         self.draining = true;
         self.flush = None;
+        self.told_drop = false;
         let mut replay: Vec<Msg> = replay
             .into_iter()
             .map(|msg| Msg::Replayed(Box::new(msg)))
@@ -592,14 +598,45 @@ impl Dvr {
     /// when it is the newest one sent and no replayed input waits in a
     /// hold.
     pub(crate) fn note_flushed(&mut self, generation: u64) {
-        if self.flush == Some(generation) && self.unfolded == 0 {
+        if self.flush == Some(generation) && self.unfolded == 0 && self.sequenced == 0 {
             self.end_drain();
         }
+    }
+
+    /// Notes that the key being folded stays in a surface's sequence
+    /// buffer, so a replayed one has not reached the engine yet.
+    pub(crate) fn hold_sequenced(&mut self) {
+        if self.replaying {
+            self.sequenced += 1;
+        }
+    }
+
+    /// Notes that the surface's sequence buffer has emptied, sending or
+    /// dropping every replayed key it held, and returns the flush to send
+    /// behind them while the replay drains.
+    pub(crate) fn release_sequenced(&mut self) -> Option<u64> {
+        if self.sequenced == 0 {
+            return None;
+        }
+        self.sequenced = 0;
+        if !self.draining || self.flush.is_none() {
+            return None;
+        }
+        self.flushes += 1;
+        self.flush = Some(self.flushes);
+        self.flush
+    }
+
+    /// Whether a review or DVR verb dropped now is the drain's first,
+    /// which says why it did nothing.
+    pub(crate) fn first_drop(&mut self) -> bool {
+        !std::mem::replace(&mut self.told_drop, true)
     }
 
     fn end_drain(&mut self) {
         self.draining = false;
         self.flush = None;
+        self.sequenced = 0;
     }
 
     /// Whether a replay's inputs may still be running in the engine, so a

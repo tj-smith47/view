@@ -241,6 +241,9 @@ fn agent_waits(model: &Model) -> Vec<&'static str> {
     .collect()
 }
 
+/// What the first review or DVR verb dropped while a replay drains says.
+pub(super) const DRAIN_NOTICE: &str = "view: review and DVR commands wait for the branch's replay";
+
 /// Runs `fold`, the fold of one input, keeping every effect that reaches
 /// the agent from leaving it while a `replayed` input, or one folded inside
 /// it, is folded.
@@ -845,6 +848,13 @@ mod tests {
         }
     }
 
+    /// How many of the messages the session holds say `text`.
+    fn told(m: &Model, text: &str) -> usize {
+        format!("{:?}", m.engine.messages.entries)
+            .matches(text)
+            .count()
+    }
+
     /// A review of one hunk, pending in the agent panel.
     fn pending_review(m: &mut Model) -> crate::native::ai_panel::DiffReviewState {
         use crate::native::diff::hunk::Hunk;
@@ -879,8 +889,10 @@ mod tests {
                 let replayed = branched(&mut m, 10, 12);
                 assert!(!reaches_agent(&replayed), "{verb}: {replayed:?}");
                 assert!(m.dvr.draining(), "{verb}: drains until nvim answers");
-                let invoked = update(&mut m, review_invoke(verb));
-                assert!(invoked.is_empty(), "{verb}: {invoked:?}");
+                let _ = update(&mut m, review_invoke(verb));
+                let again = update(&mut m, review_invoke(verb));
+                assert!(again.is_empty(), "{verb}: {again:?}");
+                assert_eq!(told(&m, DRAIN_NOTICE), 1, "{verb}: said once for the drain");
                 assert_eq!(
                     m.ai_panel().pending_diff.as_ref(),
                     Some(&review),

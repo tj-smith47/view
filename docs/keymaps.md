@@ -931,12 +931,12 @@ key that waited on `timeoutlen` can land differently the second time. The
 frames after the branch point stay in the recording and cannot be branched
 from. `b` is refused while view reads piped input. Keys you press while the
 fresh editor starts are typed after the replay. Review and recording
-commands do nothing until the replay has finished. If the fresh editor
-cannot start, view restarts the editor and offers the unsaved text back from
-its swap files, and a notice says when view could not keep one. If view
-quits during a branch, the next view you start puts the swap files back.
-Under `--remote` the swap files are on the other machine, so the
-confirm says the unsaved text is lost if the branch fails.
+commands do nothing until the replay has finished, and the first one says
+so. If the fresh editor cannot start, view restarts the editor and offers
+the unsaved text back from its swap files, and a notice says when view
+could not keep one. If view quits during a branch, the next view you start
+puts the swap files back. Under `--remote` the swap files are on the other
+machine, so the confirm says the unsaved text is lost if the branch fails.
 
 Once the input log reaches its share of `[dvr] max_mb`, view says so once,
 and frames painted after that point cannot be branched from.

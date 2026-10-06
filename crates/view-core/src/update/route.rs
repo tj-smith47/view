@@ -569,7 +569,10 @@ fn sequence_key(
     }
     keys.push(notation);
     match model.submit_hold.sequence(&keys, passes_user_keys(model)) {
-        Sequence::Prefix => model.submit_hold.keep_sequence(keys),
+        Sequence::Prefix => {
+            model.dvr.hold_sequenced();
+            model.submit_hold.keep_sequence(keys)
+        }
         Sequence::Neither => {
             let Some(last) = keys.pop() else {
                 return Vec::new();

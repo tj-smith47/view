@@ -245,7 +245,7 @@ pub(crate) enum Waiter {
     /// An open of a chosen file or buffer, answered as `Msg::PickedOpened`.
     Opened { generation: u64 },
     /// A flush behind a branch's replay, answered as `Msg::ReplayFlushed`
-    /// whatever the reply holds.
+    /// by the bridge event it schedules, or by an error reply.
     ReplayFlush { generation: u64 },
 }
 
@@ -1041,8 +1041,10 @@ impl EngineHandle {
                                         pump.route_msg(Msg::PickedOpened { generation, window });
                                 }
                             }
+                            // a chunk that ran schedules its answer as a
+                            // bridge event, and one nvim refused never will
                             Some(Waiter::ReplayFlush { generation }) => {
-                                if let Some(pump) = &reader_pump {
+                                if let (Some(pump), false) = (&reader_pump, error == Value::Nil) {
                                     pump.route_replay_flushed(Msg::ReplayFlushed { generation });
                                 }
                             }
@@ -1088,6 +1090,9 @@ impl EngineHandle {
                                     // recomputes it
                                     Some(msg @ Msg::NotifySinkRead { .. }) => {
                                         pump.route_notify_sink(msg);
+                                    }
+                                    Some(msg @ Msg::ReplayFlushed { .. }) => {
+                                        pump.route_replay_flushed(msg);
                                     }
                                     // sent only when they moved, on the
                                     // same terms
@@ -4328,6 +4333,17 @@ mod tests {
         payload.pop();
         let decoded = decode_bridge_event(&payload);
         assert!(decoded.is_none(), "got {decoded:?}");
+    }
+
+    /// The replay's answer carries the flush's generation as a number.
+    #[test]
+    fn a_bridge_replay_flushed_event_decodes_its_generation() {
+        let event = [Value::from("replay_flushed"), Value::from(7)];
+        let decoded = decode_bridge_event(&event);
+        assert!(
+            matches!(decoded, Some(Msg::ReplayFlushed { generation: 7 })),
+            "got {decoded:?}"
+        );
     }
 
     /// The escape timing, whose payload is a string because the chunk

@@ -180,6 +180,9 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
             let warnings = saturate_u32(rest.first()?.as_u64()?);
             Some(Msg::DiagnosticsChanged { errors, warnings })
         }
+        "replay_flushed" => Some(Msg::ReplayFlushed {
+            generation: first.as_u64()?,
+        }),
         "git" => Some(Msg::GitBranchChanged {
             branch: first.as_str().unwrap_or_default().to_owned(),
         }),

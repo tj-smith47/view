@@ -141,17 +141,23 @@ impl SwapCopies {
         }
     }
 
+    /// Opens the record, locked before a sweep can see it: it is created
+    /// under a name the sweep passes over, then renamed to the pid.
     fn open(&mut self) -> Option<&mut std::fs::File> {
         if self.file.is_none() {
             let dir = self.dir.as_ref()?;
             std::fs::create_dir_all(dir).ok()?;
+            let pid = std::process::id().to_string();
+            let fresh = dir.join(format!("{pid}{FRESH_SUFFIX}"));
+            // only a stopped view with this pid can have left one
+            let _ = std::fs::remove_file(&fresh);
             let file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
+                .create_new(true)
                 .write(true)
-                .open(dir.join(std::process::id().to_string()))
+                .open(&fresh)
                 .ok()?;
             file.try_lock().ok()?;
+            std::fs::rename(&fresh, dir.join(pid)).ok()?;
             self.file = Some(file);
         }
         self.file.as_mut()
@@ -174,6 +180,9 @@ fn copy_of(swap: &std::path::Path) -> PathBuf {
 /// The suffix a swap copy carries, which nvim lists as no swap of its own.
 const COPY_SUFFIX: &str = ".view-branch";
 
+/// The suffix a record carries until it is locked.
+const FRESH_SUFFIX: &str = ".new";
+
 /// Writes the swap file of every buffer with unsaved changes and copies
 /// each beside itself, noting each copy in `copies` first. A remote
 /// engine's swaps are on its own host, out of reach, so none is kept.
@@ -183,7 +192,7 @@ fn keep_swaps(engine: &Engine, copies: &mut SwapCopies) -> KeptSwaps {
     }
     let listed = engine
         .handle
-        .command("silent! preserve")
+        .preserve_changed()
         .and_then(|()| engine.handle.eval_str(CHANGED_SWAPS));
     keep_listed(listed.map_err(|err| err.to_string()), copies)
 }
@@ -228,12 +237,16 @@ pub(crate) fn restore_swap_copies() {
 }
 
 /// [`restore_swap_copies`] for the records in `dir`, passing over each
-/// one a running view holds locked.
+/// one a running view holds locked or has not locked yet.
 fn restore_in(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for record in entries.flatten().map(|entry| entry.path()) {
+    let records = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| !path.to_string_lossy().ends_with(FRESH_SUFFIX));
+    for record in records {
         let Ok(file) = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -997,6 +1010,98 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_branch_names_the_swap_listing_a_dead_engine_refused() {
+        let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+        let _ = engine.kill_exit();
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(5));
+        while !engine.handle.is_closed() {
+            assert!(std::time::Instant::now() < deadline, "the link closes");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let kept = keep_swaps(&engine, &mut SwapCopies::in_dir(None));
+        let told = lost_text(&kept);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            told[0].contains("could not list the swap files"),
+            "{told:?}"
+        );
+    }
+
+    #[test]
+    fn a_branch_writes_the_swap_of_every_modified_buffer() {
+        let scratch = view_test_support::ScratchDir::new("dvr-branch-all").unwrap();
+        let one = scratch.path().join("one.txt");
+        let two = scratch.path().join("two.txt");
+        std::fs::write(&one, "on disk\n").unwrap();
+        std::fs::write(&two, "on disk\n").unwrap();
+        let swaps = scratch.path().join("swap");
+        std::fs::create_dir_all(&swaps).unwrap();
+        // no swap is written on its own while the test runs
+        let options = format!(
+            "lua vim.o.directory = [[{}//]]; vim.o.updatecount = 10000; \
+             vim.o.updatetime = 3600000",
+            swaps.display()
+        );
+        let mut rig = Rig::new();
+        let (mut engine, _pump, _route, _ai_route, _executor) = rig.launch(
+            EngineConfig::default()
+                .with_arg("--clean")
+                .with_arg("--cmd")
+                .with_arg(options)
+                .with_env("XDG_STATE_HOME", scratch.path().join("state"))
+                .with_arg(&one)
+                .with_arg(&two),
+        );
+        engine
+            .handle
+            .command(
+                "call bufload(2) | call setbufline(1, 1, 'first unsaved') \
+                 | call setbufline(2, 1, 'second unsaved')",
+            )
+            .unwrap();
+
+        let kept = keep_swaps(&engine, &mut SwapCopies::in_dir(None));
+        let _ = engine.handle.command("qa!");
+        let _ = engine.wait_exit();
+        assert_eq!(kept.copied.len(), 2, "{:?}", kept.copied);
+        for ((_, copy), text) in kept.copied.iter().zip(["first", "second"]) {
+            let bytes = std::fs::read(copy).unwrap();
+            let unsaved = format!("{text} unsaved");
+            assert!(
+                bytes
+                    .windows(unsaved.len())
+                    .any(|w| w == unsaved.as_bytes()),
+                "{} holds no {unsaved:?}",
+                copy.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_is_locked_before_a_sweep_can_see_it() {
+        let scratch = view_test_support::ScratchDir::new("dvr-branch-open").unwrap();
+        let records = scratch.path().join("records");
+        std::fs::create_dir_all(&records).unwrap();
+        let pid = std::process::id().to_string();
+        // a view starting beside this one, ahead of its lock
+        let starting = format!("1{FRESH_SUFFIX}");
+        std::fs::write(records.join(&starting), "").unwrap();
+        // a view with this pid that stopped before its rename
+        std::fs::write(records.join(format!("{pid}{FRESH_SUFFIX}")), "").unwrap();
+
+        let mut copies = SwapCopies::in_dir(Some(records.clone()));
+        copies.note(&[PathBuf::from("/w/a.swp.view-branch")]);
+        let probe = std::fs::File::open(records.join(&pid)).unwrap();
+        assert!(probe.try_lock().is_err(), "the record is locked");
+        drop(probe);
+        restore_in(&records);
+        let mut left = crate::dvr::io::listed(&records);
+        left.sort();
+        assert_eq!(left, [starting, pid], "a record not locked yet is left");
+    }
+
+    #[test]
     fn branch_closes_the_surfaces_opened_after_the_frame() {
         let scratch = view_test_support::ScratchDir::new("dvr-branch-tree").unwrap();
         let mut rig = Rig::new();
@@ -1153,6 +1258,58 @@ mod tests {
             &fresh.executor,
             "a verb typed after the drain decides the hunk",
             |r, _| statuses(r).first() == Some(&HunkStatus::Rejected),
+        );
+    }
+
+    #[test]
+    fn a_review_verb_a_replayed_key_schedules_decides_nothing() {
+        use view_core::native::diff::HunkStatus;
+        let mapped = || {
+            EngineConfig::isolated().with_arg("--cmd").with_arg(
+                "nnoremap ga <Cmd>lua vim.schedule(function() \
+                 vim.cmd('View review accept') end)<CR>",
+            )
+        };
+        let respawn = |_: &[String]| mapped();
+        let mut rig = Rig::new();
+        let (mut engine, pump, route, ai_route, executor) = rig.launch(mapped());
+        let _ = pending_review(&mut rig);
+        typed(&mut rig, &executor, &keys(&["g", "a"]));
+        rig.settle(&engine, &pump, &executor, "the mapping accepts", |r, _| {
+            statuses(r).first() != Some(&HunkStatus::Fresh)
+        });
+        typed(&mut rig, &executor, &keys(&["x"]));
+        let at = rig.frames;
+        rig.model.ai_panel_mut().pending_diff = None;
+        let _ = pending_review(&mut rig);
+
+        let fresh = rig.branch(
+            &mut engine,
+            &respawn,
+            (&route, &ai_route, &executor),
+            at,
+            |_, e| answers(e),
+        );
+        let told = format!("{:?}", rig.model.engine.messages.entries);
+        assert!(told.contains("wait for the branch's replay"), "{told}");
+
+        // nvim sends the scheduled verb ahead of this line's, so a verb
+        // the drain let through decides the first hunk before it
+        let mut line = keys(&[":"]);
+        line.extend(chars("View review reject"));
+        line.push("<CR>".to_owned());
+        typed(&mut rig, &fresh.executor, &line);
+        rig.settle(
+            &fresh.engine,
+            &fresh.pump,
+            &fresh.executor,
+            "the typed verb decides a hunk",
+            |r, _| statuses(r).iter().any(|s| *s != HunkStatus::Fresh),
+        );
+        assert_eq!(
+            statuses(&rig),
+            [HunkStatus::Rejected, HunkStatus::Fresh],
+            "the scheduled accept decided nothing"
         );
     }
 

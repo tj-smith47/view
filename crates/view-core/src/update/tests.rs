@@ -8458,6 +8458,50 @@ fn a_held_sequence_expires_wherever_the_keyboard_went() {
     assert_back_in_the_tree_e_completes_nothing(&mut m, "expiry");
 }
 
+/// A replayed key the tree holds as the start of a sequence reaches nvim
+/// only once a later key completes it, so the replay drains until nvim
+/// answers a flush sent behind the whole sequence.
+#[test]
+fn a_replayed_key_held_in_a_sequence_drains_until_the_sequence_goes_out() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    m.dvr.enable(1 << 20);
+    m.dvr.branched(0, vec![key(" ")]);
+    let flushes = |effects: &[Effect]| -> Vec<u64> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Rpc(RpcCall::FlushReplay { generation }) => Some(*generation),
+                _ => None,
+            })
+            .collect()
+    };
+    let answer = |m: &mut Model, generation: u64| {
+        let _ = update(m, Msg::ReplayFlushed { generation });
+    };
+    let replay = m.dvr.take_replay((80, 24));
+    assert_eq!(replay.len(), 2, "the key and the resize: {replay:?}");
+    let mut folded = Vec::new();
+    for msg in replay {
+        folded.extend(update(&mut m, msg));
+    }
+    assert!(meta_inputs(&folded).is_empty(), "{folded:?}");
+    let closing = flushes(&folded);
+    assert_eq!(closing.len(), 1, "{folded:?}");
+    answer(&mut m, closing[0]);
+    assert!(m.dvr.draining(), "the held key has not reached nvim");
+
+    let sent = typed(&mut m, &["e"]);
+    assert_eq!(meta_inputs(&sent), [" ", "e"], "{sent:?}");
+    let behind = flushes(&sent);
+    assert_eq!(behind.len(), 1, "a flush behind the sequence: {sent:?}");
+    answer(&mut m, closing[0]);
+    assert!(m.dvr.draining(), "the answer before the sequence went out");
+    answer(&mut m, behind[0]);
+    assert!(!m.dvr.draining());
+}
+
 /// The windowed message stream passes a leader default on the same way.
 #[test]
 fn a_leader_default_in_the_windowed_stream_reaches_nvim() {

@@ -5,6 +5,7 @@
 //! way for it to reach the same calls.
 
 mod accent;
+mod branch;
 mod buffers;
 mod decode;
 mod fit;
@@ -3663,21 +3664,6 @@ impl EngineHandle {
     ) -> Result<(), EngineError> {
         let waiter = crate::handle::Waiter::BufferList { generation };
         self.request_async(method, params, waiter)
-    }
-
-    /// Asks nvim for a reply it sends only once it has run every input
-    /// sent ahead of this request, since it reads pending input before it
-    /// takes a request that is not `fast`. The reply crosses back as
-    /// `Msg::ReplayFlushed` tagged `generation`, error or not. Async: the
-    /// caller is the runtime loop.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::Closed` if the connection is already closed or
-    /// the writer thread has already exited.
-    pub fn flush_replay(&self, generation: u64) -> Result<(), EngineError> {
-        let waiter = crate::handle::Waiter::ReplayFlush { generation };
-        self.request_async("nvim_eval", vec![Value::from("0")], waiter)
     }
 
     /// Issues [`PREVIEW_WINDOW_CHUNK`] as an async request tagged with

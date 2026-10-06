@@ -889,6 +889,11 @@ impl SubmitHold {
         Sequence::Neither
     }
 
+    /// Whether a surface holds keys as the start of a mapped sequence.
+    pub(crate) fn holds_sequence(&self) -> bool {
+        !self.sequence.is_empty()
+    }
+
     /// Hands back the keys a surface is holding, leaving none held.
     pub(crate) fn take_sequence(&mut self) -> Vec<String> {
         std::mem::take(&mut self.sequence)

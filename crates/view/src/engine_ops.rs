@@ -124,8 +124,9 @@ pub trait EngineOps {
     /// `generation`; never blocks, and never itself returns the list (see
     /// `Msg::PickerBuffers`).
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError>;
-    /// Asks for a reply nvim sends once it has run the input sent ahead of
-    /// it, tagged `generation`; never blocks (see `Msg::ReplayFlushed`).
+    /// Asks for an answer nvim sends once it has run the input sent ahead
+    /// of it and every callback that input scheduled, tagged `generation`;
+    /// never blocks (see `Msg::ReplayFlushed`).
     fn flush_replay(&self, generation: u64) -> Result<(), EngineError>;
     /// Opens a window for `surface`, or enters the one it already has;
     /// never blocks, and never itself returns the handle (see
