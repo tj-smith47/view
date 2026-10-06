@@ -8,15 +8,13 @@ repository.workspace = true
 [lints]
 workspace = true
 
-# Only the parent-death signal needs a syscall, and only Linux has one.
-# Every other platform's half of this crate is std alone, so rustix is
-# scoped to the target that actually calls it rather than carried by every
-# build of a crate three others depend on.
-[target.'cfg(target_os = "linux")'.dependencies]
+# The parent-death signal, which only Linux has, and the signal-0 probe
+# `pid_running` asks on every unix. Windows answers both from windows-sys.
+[target.'cfg(unix)'.dependencies]
 rustix = { version = "1", default-features = false, features = [
     "std",
     # prctl(PR_SET_PDEATHSIG) and the getppid that closes its fork/exec
-    # race, both raw syscalls a pre_exec closure may make
+    # race, both raw syscalls a pre_exec closure may make, and kill(pid, 0)
     "process",
 ] }
 
@@ -27,9 +25,11 @@ windows-sys = { version = "0.61", features = [
     # CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject
     "Win32_System_JobObjects",
     # OpenProcess and the two rights a job assignment needs, plus
-    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION, which windows-sys gates here
+    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION, which windows-sys gates here,
+    # and GetExitCodeProcess for `pid_running`
     "Win32_System_Threading",
-    # CloseHandle, for a job whose limits could not be set
+    # CloseHandle, for a job whose limits could not be set, and the
+    # STILL_ACTIVE and ERROR_ACCESS_DENIED `pid_running` reads
     "Win32_Foundation",
     # SECURITY_ATTRIBUTES, which CreateJobObjectW takes a pointer to and
     # which this call passes as null

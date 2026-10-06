@@ -235,6 +235,57 @@ pub fn prepare_to_tie_children() {
     }
 }
 
+/// Whether a process with `pid` is running. A process this one may not
+/// signal or open still runs, so it reads as running.
+#[cfg(unix)]
+#[must_use]
+pub fn pid_running(pid: u32) -> bool {
+    use rustix::process::{test_kill_process, Pid};
+
+    let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
+        return false;
+    };
+    match test_kill_process(pid) {
+        Ok(()) => true,
+        Err(err) => err == rustix::io::Errno::PERM,
+    }
+}
+
+/// Whether a process with `pid` is running. A process this one may not
+/// signal or open still runs, so it reads as running.
+#[cfg(windows)]
+#[must_use]
+pub fn pid_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: the handle is checked before use and closed on the one path
+    // that opened it; `code` outlives the call that writes it.
+    #[allow(unsafe_code)]
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut code = 0u32;
+        let read = GetExitCodeProcess(process, &raw mut code) != 0;
+        CloseHandle(process);
+        !read || code == STILL_ACTIVE.cast_unsigned()
+    }
+}
+
+/// Whether a process with `pid` is running. With no way to ask, every pid
+/// reads as running.
+#[cfg(not(any(unix, windows)))]
+#[must_use]
+pub fn pid_running(_pid: u32) -> bool {
+    true
+}
+
 /// Puts an already-running child in the job object that ends what it holds
 /// when this process ends, for a caller whose child cannot go through
 /// [`spawn_tied_to_this_process`] -- a `tokio::process` spawn, which builds

@@ -273,9 +273,17 @@ fn restore_in(dir: &std::path::Path) {
 const FRESH_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Removes `fresh`, a record no view has locked, once it is older than
-/// [`FRESH_GRACE`]. It names no copy, since a view notes copies only
-/// after its record is locked and renamed.
+/// [`FRESH_GRACE`] and the view its name gives the pid of has stopped. It
+/// names no copy, since a view notes copies only after its record is
+/// locked and renamed.
 fn remove_abandoned(fresh: &std::path::Path) {
+    let running = fresh
+        .file_name()
+        .and_then(|name| name.to_str()?.strip_suffix(FRESH_SUFFIX)?.parse().ok())
+        .is_some_and(view_proc::pid_running);
+    if running {
+        return;
+    }
     let old = std::fs::metadata(fresh)
         .and_then(|meta| meta.modified())
         .ok()
@@ -1140,11 +1148,12 @@ mod tests {
             file.set_modified(at).unwrap();
             file
         };
-        let abandoned = format!("7{FRESH_SUFFIX}");
+        // pids past every platform's ceiling, so no process holds them
+        let abandoned = format!("2000000007{FRESH_SUFFIX}");
         drop(plant(&abandoned, 60));
-        let starting = format!("8{FRESH_SUFFIX}");
+        let starting = format!("2000000008{FRESH_SUFFIX}");
         drop(plant(&starting, 0));
-        let held = format!("9{FRESH_SUFFIX}");
+        let held = format!("2000000009{FRESH_SUFFIX}");
         let lock = plant(&held, 60);
         lock.try_lock().unwrap();
 
@@ -1153,6 +1162,28 @@ mod tests {
         left.sort();
         assert_eq!(left, [starting, held], "only the old unlocked one goes");
         drop(lock);
+    }
+
+    /// A view stalled between making its record and locking it keeps the
+    /// record, however old, while its pid runs.
+    #[test]
+    fn a_fresh_record_whose_view_still_runs_is_left_at_any_age() {
+        let scratch = view_test_support::ScratchDir::new("dvr-branch-stalled").unwrap();
+        let records = scratch.path().join("records");
+        std::fs::create_dir_all(&records).unwrap();
+        // this test's own process stands in for the stalled view
+        let stalled = format!("{}{FRESH_SUFFIX}", std::process::id());
+        let file = std::fs::File::create(records.join(&stalled)).unwrap();
+        let at = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        file.set_modified(at).unwrap();
+        drop(file);
+
+        restore_in(&records);
+        assert_eq!(
+            crate::dvr::io::listed(&records),
+            [stalled],
+            "a running view's record is left"
+        );
     }
 
     #[test]

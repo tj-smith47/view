@@ -266,6 +266,8 @@ pub struct Dvr {
     sequenced: bool,
     /// Whether this drain has said that it drops review and DVR verbs.
     told_drop: bool,
+    /// Whether this drain has said that its replay outran a bound.
+    told_slow: bool,
     /// The clip the scrub shows in place of the recording.
     clip: Option<String>,
     /// How many of the clip's oldest frames did not fit `[dvr] max_mb`.
@@ -564,6 +566,7 @@ impl Dvr {
         self.draining = true;
         self.flush = None;
         self.told_drop = false;
+        self.told_slow = false;
         let mut replay: Vec<Msg> = replay
             .into_iter()
             .map(|msg| Msg::Replayed(Box::new(msg)))
@@ -623,15 +626,16 @@ impl Dvr {
         }
     }
 
-    /// Notes that the answer to flush `generation` never came within its
-    /// bound, which ends the drain on the terms an answer would. Returns
-    /// whether it did.
+    /// Notes that the answer to flush `generation` has not come within its
+    /// bound. When that answer is the one that would end the drain, asks a
+    /// newer flush, since a replayed command may still be running in nvim.
+    /// Returns whether this is the drain's first such ask, which says so.
     pub(crate) fn note_unanswered(&mut self, generation: u64) -> bool {
-        let ends = self.draining && self.sent_all(generation);
-        if ends {
-            self.end_drain();
+        if !(self.draining && self.sent_all(generation)) {
+            return false;
         }
-        ends
+        self.ask_flush();
+        !std::mem::replace(&mut self.told_slow, true)
     }
 
     /// Notes that a surface holds the key being folded as the start of a

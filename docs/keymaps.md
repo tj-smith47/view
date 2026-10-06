@@ -933,8 +933,8 @@ from. `b` is refused while view reads piped input. Keys you press while the
 fresh editor starts are typed after the replay. Review and recording
 commands do nothing until the replay has finished. The first one says so,
 and you press it again after. If the editor has not said the replay
-finished a few seconds after its last key, view says so and the commands
-work again. If the fresh editor cannot start, view restarts the editor and
+finished a few seconds after its last key, view says so once and keeps
+waiting. If the fresh editor cannot start, view restarts the editor and
 offers the unsaved text back from its swap files, and a notice says when
 view could not keep one. If view quits during a branch, the next view you start
 puts the swap files back. Under `--remote` the swap files are on the other

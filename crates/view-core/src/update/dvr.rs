@@ -245,9 +245,9 @@ fn agent_waits(model: &Model) -> Vec<&'static str> {
 pub(super) const DRAIN_NOTICE: &str =
     "view: review and DVR commands do nothing until the branch's replay finishes; press it again after";
 
-/// What a replay whose answer never came within its bound says.
+/// What a replay whose answer has not come within its bound says.
 pub(super) const UNANSWERED_NOTICE: &str =
-    "view: the answer to the branch's replay never came; review and DVR commands work again";
+    "view: the branch's replay has not finished; review and DVR commands do nothing until it has";
 
 /// Notes nvim's answer to the replay's flush `generation`.
 pub(super) fn on_flushed(model: &mut Model, generation: u64) -> Vec<Effect> {
@@ -255,8 +255,9 @@ pub(super) fn on_flushed(model: &mut Model, generation: u64) -> Vec<Effect> {
     Vec::new()
 }
 
-/// Ends the drain whose newest flush `generation` went unanswered for its
-/// whole bound, saying so.
+/// Asks the drain's flush again when its newest `generation` went
+/// unanswered for its whole bound, saying so once per drain. The flush
+/// and its bound go out behind the message, from [`flush_behind`].
 pub(super) fn on_unanswered(model: &mut Model, generation: u64) -> Vec<Effect> {
     if !model.dvr.note_unanswered(generation) {
         return Vec::new();
@@ -296,10 +297,9 @@ pub(super) fn flush_behind(
     effects
 }
 
-/// How long nvim has to answer a replay's flush before the drain ends
-/// without it: a callback starved behind a prompt, or a failed notify,
-/// would otherwise keep review and DVR commands doing nothing until the
-/// engine restarts.
+/// How long nvim has to answer a replay's flush before view asks again
+/// and says the replay has not finished: a callback starved behind a
+/// prompt, or a failed notify, is answered by the newer flush.
 const REPLAY_ANSWER_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Runs `fold`, the fold of one input, keeping every effect that reaches
@@ -960,46 +960,93 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_replay_whose_answer_never_comes_ends_its_drain_at_the_bound() {
-        let mut m = recorded();
-        let _ = update(&mut m, key("x"));
-        m.dvr.note_frame(10, 2);
-        let replayed = branched(&mut m, 10, 12);
-        let bounds: Vec<u64> = replayed
+    /// The bounds `effects` arm, each with the flush it was armed for.
+    fn bounds(effects: &[Effect]) -> Vec<u64> {
+        let flushes: Vec<u64> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Rpc(RpcCall::FlushReplay { generation }) => Some(*generation),
+                _ => None,
+            })
+            .collect();
+        let bounds: Vec<u64> = effects
             .iter()
             .filter_map(|e| match e {
                 Effect::ScheduleReplayBound { generation, .. } => Some(*generation),
                 _ => None,
             })
             .collect();
-        assert_eq!(bounds.len(), 1, "{replayed:?}");
+        assert_eq!(flushes, bounds, "one bound per flush: {effects:?}");
+        bounds
+    }
+
+    /// A replayed command nvim runs past the bound keeps the drain: the
+    /// bound asks again, and only nvim's answer ends it.
+    #[test]
+    fn a_replay_running_past_its_bound_drains_until_nvim_answers() {
+        let mut m = recorded();
+        m.ai_enabled = true;
+        m.ai_trusted = true;
+        let _ = update(&mut m, key("x"));
+        type_line(&mut m, "%!sort");
+        let _ = update(&mut m, review_invoke("accept"));
+        m.dvr.note_frame(10, 2);
+        let review = pending_review(&mut m);
+        let replayed = branched(&mut m, 10, 12);
+        let first = bounds(&replayed);
+        assert_eq!(first.len(), 1, "{replayed:?}");
+
         let stale = update(
             &mut m,
             Msg::ReplayUnanswered {
-                generation: bounds[0].wrapping_sub(1),
+                generation: first[0].wrapping_sub(1),
             },
         );
-        assert!(stale.is_empty(), "{stale:?}");
-        assert!(m.dvr.draining(), "an older bound ends nothing");
-        let _ = update(
+        assert!(stale.is_empty(), "an older bound asks nothing: {stale:?}");
+
+        let asked = update(
             &mut m,
             Msg::ReplayUnanswered {
-                generation: bounds[0],
+                generation: first[0],
             },
         );
-        assert!(
-            !m.dvr.draining(),
-            "the answer is not waited for past the bound"
-        );
+        let second = bounds(&asked);
+        assert_eq!(second.len(), 1, "the bound asks again: {asked:?}");
+        assert!(second[0] > first[0], "a newer flush: {asked:?}");
+        assert!(m.dvr.draining(), "the bound ends no drain");
         assert_eq!(told(&m, UNANSWERED_NOTICE), 1);
-        let _ = update(
+
+        let late = update(&mut m, review_invoke("accept"));
+        assert!(late.is_empty(), "{late:?}");
+        assert_eq!(
+            m.ai_panel().pending_diff.as_ref(),
+            Some(&review),
+            "the late replayed verb leaves the live review"
+        );
+
+        let third = bounds(&update(
             &mut m,
             Msg::ReplayUnanswered {
-                generation: bounds[0],
+                generation: second[0],
+            },
+        ));
+        assert_eq!(third.len(), 1);
+        assert_eq!(told(&m, UNANSWERED_NOTICE), 1, "said once per drain");
+
+        let _ = update(
+            &mut m,
+            Msg::ReplayFlushed {
+                generation: second[0],
             },
         );
-        assert_eq!(told(&m, UNANSWERED_NOTICE), 1, "said once");
+        assert!(m.dvr.draining(), "an older answer ends nothing");
+        let _ = update(
+            &mut m,
+            Msg::ReplayFlushed {
+                generation: third[0],
+            },
+        );
+        assert!(!m.dvr.draining(), "nvim's answer ends the drain");
     }
 
     #[test]

@@ -1,12 +1,10 @@
 //! The pure state transition: `Msg` in, `Model` mutated, `Effect`s out.
 
-use crate::model::{Focus, Model, OverlayKind, Tier};
+use crate::model::{Focus, Model, OverlayKind};
 use crate::msg::{DeleteConfirmOutcome, Effect, EngineRequest, Key, Msg, RpcCall};
 use crate::native::diff::BufTextChangedEvent;
 use crate::native::geometry::NativeSurface;
 use crate::native::supervision::WedgeKind;
-use crate::native::toast::ToastMotion;
-use crate::native::views::Span;
 
 /// How long a session parks foreign startup messages before giving up on
 /// hearing whether a channel it owns is held and letting them through.
@@ -77,6 +75,7 @@ mod supervision;
 mod surface_conflict;
 pub(crate) mod surfaces;
 mod theme;
+mod toast_exit;
 mod ui_event;
 mod watch;
 
@@ -94,6 +93,7 @@ use surfaces::{
     toggle_notifications_stream, toggle_tree_sidebar, tree_git_refresh_effect,
 };
 use theme::{on_colorscheme_missing, on_vim_enter};
+use toast_exit::start_toast_exit;
 use ui_event::apply_ui_event;
 use watch::{
     on_checktime_reply, on_confirm_external_removal, on_external_watch_degraded,
@@ -353,37 +353,6 @@ fn update_one(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // here once for the column's width so a frame reads the wrap
     model.place_notices();
     effects
-}
-
-/// Starts the stack's exit motion for a notice that just left, and asks for
-/// the first frame's wakeup.
-///
-/// The gate is the tier and nothing else: below `Tier::Full` there is no
-/// interpolation at all, so no motion is started, no tick is ever scheduled,
-/// and the stack paints the state it is already in. The slot timers and the
-/// pause key are untouched either way -- motion is presentation, timing is
-/// behavior.
-fn start_toast_exit(model: &mut Model, departed: Option<(Vec<Vec<Span>>, usize)>) -> Vec<Effect> {
-    let Some((lines, slot)) = departed else {
-        return Vec::new();
-    };
-    if model.caps.tier != Tier::Full {
-        return Vec::new();
-    }
-    // one wakeup chain at a time: a second dismissal landing while the
-    // first is still playing replaces the motion and is driven by the chain
-    // already running, because two chains ticking one clock advance it twice
-    // per interval and the stack arrives in half the time it was given
-    let already_ticking = model.toast_motion.is_some();
-    let width = model.notice_column().rect.2;
-    model.toast_motion = Some(ToastMotion::exit_right(lines, slot, width));
-    model.dirty = true;
-    if already_ticking {
-        return Vec::new();
-    }
-    vec![Effect::ScheduleAnimTick {
-        after: crate::native::toast::MOTION_STEP,
-    }]
 }
 
 fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
