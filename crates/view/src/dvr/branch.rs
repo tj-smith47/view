@@ -542,6 +542,11 @@ mod tests {
                 changed: Vec::new(),
                 unverifiable: false,
             });
+            // a held `y` reaches the confirm only once the loop releases it
+            assert!(
+                !self.model.submit_hold.is_holding(),
+                "no hold stands over the confirm"
+            );
             let _ = view_core::update::update(&mut self.model, scrub);
             assert!(self.model.dvr.scrub_frame().is_some(), "the scrub opens");
             self.model.dvr.show(at);
@@ -1020,21 +1025,15 @@ mod tests {
             crate::dvr::io::listed(&swaps),
             [format!("{swap}{COPY_SUFFIX}")]
         );
-        // a view that stops here leaves its record unlocked
+        // a view that stops here leaves its record unlocked. The lock
+        // belongs to the open file, which a child another test forks
+        // shares until it runs its program, so the record is written
+        // afresh as the stopped view leaves it
         drop(copies);
-        // a child another test forks in the meantime holds the lock until
-        // it runs its program
-        let probe = std::fs::File::open(records.join(std::process::id().to_string())).unwrap();
-        let deadline = std::time::Instant::now()
-            + view_test_support::host_deadline(std::time::Duration::from_secs(5));
-        while probe.try_lock().is_err() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the record stays locked"
-            );
-            std::thread::yield_now();
-        }
-        drop(probe);
+        let record = records.join(std::process::id().to_string());
+        let named = std::fs::read_to_string(&record).unwrap();
+        std::fs::remove_file(&record).unwrap();
+        std::fs::write(&record, named).unwrap();
 
         restore_in(&records);
         assert_eq!(crate::dvr::io::listed(&swaps), [swap]);
@@ -1426,9 +1425,11 @@ mod tests {
                 .count()
         };
         let mut live = 0;
+        // the line's hold can outlast its export, and keys typed under it
+        // stay held
         rig.settle(&engine, &pump, &executor, "the line exports", |r, _| {
             live += exports(r);
-            live == 1
+            live == 1 && !r.model.submit_hold.is_holding()
         });
         typed(&mut rig, &executor, &keys(&["x"]));
         let at = rig.frames;
