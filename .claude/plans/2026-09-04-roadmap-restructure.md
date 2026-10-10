@@ -415,7 +415,12 @@ code change).
   at once passed 7 rounds of 8; the eighth failed in key registration.
   `keys_typed_ahead_after_a_refused_insert_reach_the_picker` failed once
   under gate load and never alone; its cause is unknown and its failure
-  message now prints the state it needs.
+  message now prints the state it needs. Under twelve copies of the `dvr::`
+  tests at once (2026-10-10), `branch_through_a_picker_query_reproduces_it`
+  twice saw its query `abc` reach the buffer as normal-mode keys: the picker
+  opened later than the hold's backstop, which released the keys to nvim.
+  Never seen at gate load. Whether a slow picker open should let the query
+  through is the question for that session.
 - *Next lever.* The review's three fixes as written: time the first batch
   from the oldest key in flight, schedule a wake at the newest key plus the
   floor, and require the mode report only after a key that can leave the
